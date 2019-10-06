@@ -10,6 +10,7 @@ layout(row_major, std140) uniform ub_SceneParams {
 layout(row_major, std140) uniform ub_MeshFragParams {
     Mat4x3 u_BoneMatrix[1];
     vec4 u_Color;
+    vec4 u_TexScaleOffset;
 };
 
 uniform sampler2D u_Texture[1];
@@ -42,7 +43,7 @@ void main() {
     t_Color *= u_Color;
 
 #ifdef USE_TEXTURE
-    t_Color *= texture2D(u_Texture[0], v_TexCoord);
+    t_Color *= texture2D(u_Texture[0], fract(v_TexCoord) * u_TexScaleOffset.xy + u_TexScaleOffset.zw);
 #endif
 
     if (t_Color.a < 1.0/255.0) discard;

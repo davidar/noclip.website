@@ -67,7 +67,8 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
         const [colorSets, ipl] = await Promise.all([this.fetchTimeCycle(dataFetcher), this.fetchIPL(this.id, dataFetcher)]);
         const renderer = new GTA3Renderer(device, colorSets);
         const sceneRenderer = new SceneRenderer();
-        const loaded = new Map<String, Promise<void>>();
+
+        const loadedTXD = new Map<String, Promise<void>>();
         for (const item of ipl.instances) {
             const name = item.modelName;
             if (name.startsWith('lod')) continue; // ignore LOD objects
@@ -83,25 +84,34 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
                 continue;
             }
 
-            if (!loaded.has(name + '.dff')) {
-                let txdLoaded = loaded.get(txdName + '.txd');
-                if (!txdLoaded) {
-                    const txdPath = (txdName === 'generic') ? `${pathBase}/models/generic.txd` : `${pathBase}/models/gta3/${txdName}.txd`;
-                    txdLoaded = dataFetcher.fetchData(txdPath).then(buffer => {
-                        const stream = new rw.StreamMemory(buffer.arrayBuffer);
-                        const header = new rw.ChunkHeaderInfo(stream);
-                        assert(header.type === rw.PluginID.ID_TEXDICTIONARY);
-                        const txd = new rw.TexDictionary(stream);
-                        header.delete();
-                        stream.delete();
-                        renderer._textureHolder.addTXD(device, txd);
-                        txd.delete();
-                    });
-                    loaded.set(txdName + '.txd', txdLoaded);
-                }
+            if (!loadedTXD.has(txdName)) {
+                const txdPath = (txdName === 'generic') ? `${pathBase}/models/generic.txd` : `${pathBase}/models/gta3/${txdName}.txd`;
+                loadedTXD.set(txdName, dataFetcher.fetchData(txdPath).then(buffer => {
+                    const stream = new rw.StreamMemory(buffer.arrayBuffer);
+                    const header = new rw.ChunkHeaderInfo(stream);
+                    assert(header.type === rw.PluginID.ID_TEXDICTIONARY);
+                    const txd = new rw.TexDictionary(stream);
+                    header.delete();
+                    stream.delete();
+                    renderer._textureHolder.addTXD(device, txd);
+                    txd.delete();
+                }));
+            }
+        }
+        await Promise.all(loadedTXD.values());
+        renderer._textureHolder.buildTextureAtlas(device);
+
+        const loadedDFF = new Map<String, Promise<void>>();
+        for (const item of ipl.instances) {
+            const name = item.modelName;
+            if (name.startsWith('lod')) continue; // ignore LOD objects
+
+            const obj = objects.get(name);
+            if (!obj) continue;
+
+            if (!loadedDFF.has(name)) {
                 const dffPath = `${pathBase}/models/gta3/${name}.dff`;
-                loaded.set(name + '.dff', dataFetcher.fetchData(dffPath).then(async buffer => {
-                    await txdLoaded;
+                loadedDFF.set(name, dataFetcher.fetchData(dffPath).then(async buffer => {
                     const stream = new rw.StreamMemory(buffer.arrayBuffer);
                     const header = new rw.ChunkHeaderInfo(stream);
                     assert(header.type === rw.PluginID.ID_CLUMP);
@@ -115,7 +125,7 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
         }
 
         for (const item of ipl.instances) {
-            const dffLoaded = loaded.get(item.modelName + '.dff');
+            const dffLoaded = loadedDFF.get(item.modelName);
             if (dffLoaded) dffLoaded.then(() => sceneRenderer.addItem(item));
         }
         renderer.sceneRenderers.push(sceneRenderer);
