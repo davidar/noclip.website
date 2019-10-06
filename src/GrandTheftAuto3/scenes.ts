@@ -118,7 +118,7 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
                     const clump = rw.Clump.streamRead(stream);
                     header.delete();
                     stream.delete();
-                    sceneRenderer.addModel(device, renderer._textureHolder, name, clump, obj);
+                    sceneRenderer.addModel(renderer._textureHolder, name, clump, obj);
                     clump.delete();
                 }));
             }
@@ -126,8 +126,9 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
 
         for (const item of ipl.instances) {
             const dffLoaded = loadedDFF.get(item.modelName);
-            if (dffLoaded) dffLoaded.then(() => sceneRenderer.addItem(item));
+            if (dffLoaded) await dffLoaded.then(() => sceneRenderer.addItem(item));
         }
+        sceneRenderer.createLayers(device);
         renderer.sceneRenderers.push(sceneRenderer);
         return renderer;
     }

@@ -9,8 +9,8 @@ import { GfxDevice, GfxFormat, GfxBufferUsage, GfxBuffer, GfxVertexAttributeDesc
 import { makeStaticDataBuffer, makeStaticDataBufferFromSlice } from "../gfx/helpers/BufferHelpers";
 import { DeviceProgram } from "../Program";
 import { convertToTriangleIndexBuffer, filterDegenerateTriangleIndexBuffer, GfxTopology } from "../gfx/helpers/TopologyHelpers";
-import { fillMatrix4x3, fillMatrix4x4, fillColor, fillVec4v } from "../gfx/helpers/UniformBufferHelpers";
-import { mat4, quat, vec4 } from "gl-matrix";
+import { fillMatrix4x3, fillMatrix4x4, fillColor, fillVec4v, fillVec3 } from "../gfx/helpers/UniformBufferHelpers";
+import { mat4, quat, vec4, vec3, vec2 } from "gl-matrix";
 import { computeViewMatrix, Camera } from "../Camera";
 import ArrayBufferSlice from "../ArrayBufferSlice";
 import { GfxRenderHelper } from "../gfx/render/GfxRenderGraph";
@@ -18,7 +18,7 @@ import { nArray, assertExists, assert } from "../util";
 import { BasicRenderTarget, makeClearRenderPassDescriptor } from "../gfx/helpers/RenderTargetHelpers";
 import { GfxRenderInstManager, GfxRendererLayer, makeSortKey } from "../gfx/render/GfxRenderer";
 import { ItemInstance, ObjectDefinition, ObjectFlags } from "./item";
-import { Color, colorNew, White, colorNewCopy, colorLerp } from "../Color";
+import { Color, colorNew, White, colorNewCopy, colorLerp, colorMult } from "../Color";
 import { ColorSet } from "./time";
 
 const TIME_FACTOR = 2500; // one day cycle per minute
@@ -47,9 +47,7 @@ export class RWTexture implements TextureBase {
 export class RWTextureHolder extends TextureHolder<RWTexture> {
     private textures: RWTexture[] = [];
 
-    public atlas: GfxTexture;
-    public atlasWidth = 0;
-    public atlasHeight = 0;
+    public atlas = new TextureMapping();
 
     public addTXD(device: GfxDevice, txd: rw.TexDictionary) {
         for (let lnk = txd.textures.begin; !lnk.is(txd.textures.end); lnk = lnk.next) {
@@ -118,15 +116,15 @@ export class RWTextureHolder extends TextureHolder<RWTexture> {
             }
             return a.height < b.height ? 1 : -1;
         });
-        this.atlasWidth = Math.min(2048, 1 << Math.ceil(Math.log(Math.sqrt(area)) / Math.log(2)));
-        this.atlasHeight = this.textures[0].height;
+        const atlasWidth = Math.min(2048, 1 << Math.ceil(Math.log(Math.sqrt(area)) / Math.log(2)));
+        let atlasHeight = this.textures[0].height;
         let ax = 0;
         let ay = 0;
         for (const texture of this.textures) {
-            if (texture.width > this.atlasWidth - ax) {
+            if (texture.width > atlasWidth - ax) {
                 ax = 0;
-                ay = this.atlasHeight;
-                this.atlasHeight += texture.height;
+                ay = atlasHeight;
+                atlasHeight += texture.height;
             }
             texture.atlasX = ax;
             texture.atlasY = ay;
@@ -134,12 +132,12 @@ export class RWTextureHolder extends TextureHolder<RWTexture> {
         }
 
         // Finalize texture atlas after placing all textures.
-        const pixels = new Uint8Array(this.atlasWidth * this.atlasHeight * 4);
+        const pixels = new Uint8Array(atlasWidth * atlasHeight * 4);
         for (const texture of this.textures) {
             for (let y = 0; y < texture.height; y++) {
                 for (let x = 0; x < texture.width; x++) {
                     const srcOffs = (y * texture.width + x) * (texture.depth / 8);
-                    const atlasOffs = ((y + texture.atlasY) * this.atlasWidth + x + texture.atlasX) * 4;
+                    const atlasOffs = ((y + texture.atlasY) * atlasWidth + x + texture.atlasX) * 4;
                     pixels[atlasOffs] = texture.pixels[srcOffs];
                     pixels[atlasOffs + 1] = texture.pixels[srcOffs + 1];
                     pixels[atlasOffs + 2] = texture.pixels[srcOffs + 2];
@@ -153,14 +151,33 @@ export class RWTextureHolder extends TextureHolder<RWTexture> {
         }
         const gfxTexture = device.createTexture({
             dimension: GfxTextureDimension.n2D, pixelFormat: GfxFormat.U8_RGBA,
-            width: this.atlasWidth, height: this.atlasHeight, depth: 1, numLevels: 1
+            width: atlasWidth, height: atlasHeight, depth: 1, numLevels: 1
         });
         device.setResourceName(gfxTexture, `textureAtlas`);
         const hostAccessPass = device.createHostAccessPass();
         hostAccessPass.uploadTextureData(gfxTexture, 0, [pixels]);
         device.submitPass(hostAccessPass);
 
-        this.atlas = gfxTexture;
+        this.atlas.gfxTexture = gfxTexture;
+        this.atlas.width = atlasWidth;
+        this.atlas.height = atlasHeight;
+        this.atlas.flipY = false;
+
+        this.atlas.gfxSampler = device.createSampler({
+            magFilter: GfxTexFilterMode.BILINEAR,
+            minFilter: GfxTexFilterMode.BILINEAR,
+            mipFilter: GfxMipFilterMode.LINEAR,
+            minLOD: 0,
+            maxLOD: 1000,
+            wrapS: GfxWrapMode.CLAMP,
+            wrapT: GfxWrapMode.CLAMP,
+        });
+    }
+
+    public destroy(device: GfxDevice): void {
+        super.destroy(device);
+        if (this.atlas.gfxSampler !== null)
+            device.destroySampler(this.atlas.gfxSampler);
     }
 }
 
@@ -168,6 +185,7 @@ class GTA3Program extends DeviceProgram {
     public static a_Position = 0;
     public static a_Color = 1;
     public static a_TexCoord = 2;
+    public static a_TexFactor = 3;
 
     public static ub_SceneParams = 0;
     public static ub_MeshFragParams = 1;
@@ -176,163 +194,89 @@ class GTA3Program extends DeviceProgram {
     public both = GTA3Program.program;
 }
 
-class MeshFragData {
-    private idxBuffer: GfxBuffer;
-    public inputState: GfxInputState;
-    public indexCount: number;
+interface VertexAttributes {
+    position: vec3;
+    color: Color;
+    //normal?: vec3;
+    texCoord?: vec2;
+}
 
-    public gfxSamplers: GfxSampler[] = [];
-    public program: GTA3Program;
-    public textureMapping = nArray(1, () => new TextureMapping());
-    public baseColor = colorNewCopy(White);
-    public texScaleOffset = vec4.fromValues(0,0,0,0);
+class MeshFragData {
+    public vertices: VertexAttributes[] = [];
+    public indices: Uint16Array;
     public transparent = false;
 
-    constructor(device: GfxDevice, textureHolder: RWTextureHolder, header: rw.MeshHeader, mesh: rw.Mesh, public parent: MeshData) {
-        const triIdxData = convertToTriangleIndexBuffer(header.tristrip ? GfxTopology.TRISTRIP : GfxTopology.TRIANGLES, assertExists(mesh.indices));
-        const idxData = filterDegenerateTriangleIndexBuffer(triIdxData);
-        this.idxBuffer = makeStaticDataBuffer(device, GfxBufferUsage.INDEX, idxData.buffer);
-        this.indexCount = idxData.length;
-
-        const idxBuffer: GfxVertexBufferDescriptor = { buffer: this.idxBuffer, byteStride: 0, byteOffset: 0 };
-        this.inputState = device.createInputState(this.parent.inputLayout, this.parent.buffers, idxBuffer);
-
-        this.program = new GTA3Program();
-
-        const col = mesh.material.color;
-        if (col)
-            this.baseColor = colorNew(col[0] / 0xFF, col[1] / 0xFF, col[2] / 0xFF, col[3] / 0xFF);
-
-        if (this.baseColor.a < 1)
-            this.transparent = true;
-
+    constructor(textureHolder: RWTextureHolder, header: rw.MeshHeader, mesh: rw.Mesh,
+                positions: Float32Array, normals: Float32Array | null, texCoords: Float32Array | null, colors: Uint8Array | null) {
+        let texScale = vec2.fromValues(0,0);
+        let texOffset = vec2.fromValues(0,0);
         const texture = mesh.material.texture;
         if (texture) {
             const texName = texture.name.toLowerCase();
             if (!textureHolder.hasTexture(texName)) {
                 console.warn('Missing texture', texName);
-                return;
+            } else {
+                const tex = textureHolder.findTexture(texName)!;
+                texScale  = vec2.fromValues(tex.width  / textureHolder.atlas.width, tex.height / textureHolder.atlas.height);
+                texOffset = vec2.fromValues(tex.atlasX / textureHolder.atlas.width, tex.atlasY / textureHolder.atlas.height);
+                if (rw.Raster.formatHasAlpha(texture.raster.format)) this.transparent = true;
             }
-            const textureMapping = this.textureMapping[0];
-            textureMapping.gfxTexture = textureHolder.atlas;
-            textureMapping.width = textureHolder.atlasWidth;
-            textureMapping.height = textureHolder.atlasHeight;
-            textureMapping.flipY = false;
-
-            const tex = textureHolder.findTexture(texName)!;
-            this.texScaleOffset = vec4.fromValues(
-                tex.width  / textureHolder.atlasWidth,
-                tex.height / textureHolder.atlasHeight,
-                tex.atlasX / textureHolder.atlasWidth,
-                tex.atlasY / textureHolder.atlasHeight,
-            );
-
-            if (rw.Raster.formatHasAlpha(texture.raster.format)) this.transparent = true;
-
-            this.program.defines.set('USE_TEXTURE', '1');
-
-            const gfxSampler = device.createSampler({
-                magFilter: GfxTexFilterMode.BILINEAR,
-                minFilter: GfxTexFilterMode.BILINEAR,
-                mipFilter: GfxMipFilterMode.LINEAR,
-                minLOD: 0,
-                maxLOD: 1000,
-                wrapS: GfxWrapMode.CLAMP,
-                wrapT: GfxWrapMode.CLAMP,
-            });
-            this.gfxSamplers.push(gfxSampler);
-
-            textureMapping.gfxSampler = gfxSampler;
         }
-    }
 
-    public destroy(device: GfxDevice): void {
-        device.destroyBuffer(this.idxBuffer);
-        device.destroyInputState(this.inputState);
-        for (let i = 0; i < this.gfxSamplers.length; i++)
-            device.destroySampler(this.gfxSamplers[i]);
-    }
-}
+        let baseColor = colorNewCopy(White);
+        const col = mesh.material.color;
+        if (col)
+            baseColor = colorNew(col[0] / 0xFF, col[1] / 0xFF, col[2] / 0xFF, col[3] / 0xFF);
 
-function makeStaticDataBufferFromTypedArray(device: GfxDevice, usage: GfxBufferUsage, v: Float32Array | Uint8Array): GfxBuffer {
-    const slice = new ArrayBufferSlice(v.buffer, v.byteOffset, v.byteLength);
-    return makeStaticDataBufferFromSlice(device, usage, slice);
+        if (baseColor.a < 1)
+            this.transparent = true;
+
+        const indexMap = Array.from(new Set(mesh.indices)).sort();
+        for (const i of indexMap) {
+            const vertex: VertexAttributes = {
+                position: vec3.fromValues(positions[3*i+0], positions[3*i+1], positions[3*i+2]),
+                color: colorNewCopy(baseColor)
+            };
+            //if (normals !== null)
+            //    vertex.normal = vec3.fromValues(normals[3*i+0], normals[3*i+1], normals[3*i+2]);
+            if (texCoords !== null)
+                vertex.texCoord = vec2.fromValues(
+                    (texCoords[2*i+0] % 1) * texScale[0] + texOffset[0],
+                    (texCoords[2*i+1] % 1) * texScale[1] + texOffset[1]);
+            if (colors !== null)
+                colorMult(vertex.color, vertex.color, colorNew(colors[4*i+0]/0xFF, colors[4*i+1]/0xFF, colors[4*i+2]/0xFF, colors[4*i+3]/0xFF));
+            this.vertices.push(vertex);
+        }
+
+        this.indices = filterDegenerateTriangleIndexBuffer(convertToTriangleIndexBuffer(
+            header.tristrip ? GfxTopology.TRISTRIP : GfxTopology.TRIANGLES,
+            mesh.indices!.map(index => indexMap.indexOf(index))));
+    }
 }
 
 class MeshData {
-    private posBuffer: GfxBuffer;
-    private colorBuffer: GfxBuffer | null;
-    private uvBuffer: GfxBuffer | null;
-    public inputLayout: GfxInputLayout;
-    public buffers: (GfxVertexBufferDescriptor | null)[];
     public meshFragData: MeshFragData[] = [];
 
-    constructor(device: GfxDevice, textureHolder: RWTextureHolder, atomic: rw.Atomic, public obj: ObjectDefinition) {
+    constructor(textureHolder: RWTextureHolder, atomic: rw.Atomic, public obj: ObjectDefinition) {
         const geom = atomic.geometry;
 
-        const positions = assertExists(geom.morphTarget(0).vertices);
-        this.posBuffer = makeStaticDataBufferFromTypedArray(device, GfxBufferUsage.VERTEX, positions);
-
+        const positions = geom.morphTarget(0).vertices!;
         const normals = geom.morphTarget(0).normals;
-        if (normals) {
-            // TODO
-        }
-
-        if (geom.numTexCoordSets) {
-            const texCoords = geom.texCoords(0)!;
-            this.uvBuffer = makeStaticDataBufferFromTypedArray(device, GfxBufferUsage.VERTEX, texCoords);
-        } else {
-            this.uvBuffer = null;
-        }
-
-        let colors = geom.colors;
-        if (colors !== null) {
-            this.colorBuffer = makeStaticDataBufferFromTypedArray(device, GfxBufferUsage.VERTEX, colors);
-        } else {
-            this.colorBuffer = null;
-        }
-
-        const vertexAttributeDescriptors: GfxVertexAttributeDescriptor[] = [
-            { location: GTA3Program.a_Position, bufferIndex: 0, bufferByteOffset: 0, format: GfxFormat.F32_RGB, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
-            { location: GTA3Program.a_Color, bufferIndex: 1, bufferByteOffset: 0, format: GfxFormat.U8_RGBA_NORM, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
-            { location: GTA3Program.a_TexCoord, bufferIndex: 2, bufferByteOffset: 0, format: GfxFormat.F32_RG, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
-        ];
-
-        this.inputLayout = device.createInputLayout({
-            vertexAttributeDescriptors,
-            indexBufferFormat: GfxFormat.U16_R,
-        });
-        this.buffers = [
-            { buffer: this.posBuffer, byteStride: 0x0C, byteOffset: 0 },
-            this.colorBuffer ? { buffer: this.colorBuffer, byteStride: 0x04, byteOffset: 0 } : null,
-            this.uvBuffer    ? { buffer: this.uvBuffer, byteStride: 0x08, byteOffset: 0 } : null,
-        ];
+        const texCoords = (geom.numTexCoordSets > 0) ? geom.texCoords(0) : null;
+        const colors = geom.colors;
 
         let h = geom.meshHeader;
         for (let i = 0; i < h.numMeshes; i++) {
-            const frag = new MeshFragData(device, textureHolder, h, h.mesh(i), this);
-            if (atomic.geometry.colors !== null)
-                frag.program.defines.set('USE_VERTEX_COLOR', '1');
+            const frag = new MeshFragData(textureHolder, h, h.mesh(i), positions, normals, texCoords, colors);
             this.meshFragData.push(frag);
         }
-    }
-
-    public destroy(device: GfxDevice): void {
-        device.destroyBuffer(this.posBuffer);
-        if (this.colorBuffer !== null)
-            device.destroyBuffer(this.colorBuffer);
-        if (this.uvBuffer !== null)
-            device.destroyBuffer(this.uvBuffer);
-        device.destroyInputLayout(this.inputLayout);
-        for (let i = 0; i < this.meshFragData.length; i++)
-            this.meshFragData[i].destroy(device);
     }
 }
 
 class ModelCache {
     public meshData = new Map<string, MeshData>();
 
-    public addModel(device: GfxDevice, textureHolder: RWTextureHolder, modelName: string, model: rw.Clump, obj: ObjectDefinition) {
+    public addModel(textureHolder: RWTextureHolder, modelName: string, model: rw.Clump, obj: ObjectDefinition) {
         let node: rw.Atomic | null = null;
         for (let lnk = model.atomics.begin; !lnk.is(model.atomics.end); lnk = lnk.next) {
             const atomic = rw.Atomic.fromClump(lnk);
@@ -342,90 +286,155 @@ class ModelCache {
                 node = atomic;
             }
         }
-        this.meshData.set(modelName, new MeshData(device, textureHolder, assertExists(node), obj));
-    }
-
-    public destroy(device: GfxDevice): void {
-        for (const meshData of this.meshData.values())
-            meshData.destroy(device);
+        this.meshData.set(modelName, new MeshData(textureHolder, assertExists(node), obj));
     }
 }
 
-const scratchMat4 = mat4.create();
-class MeshFragInstance {
-    private gfxProgram: GfxProgram | null = null;
-    public megaStateFlags: Partial<GfxMegaStateDescriptor> = {
-        blendMode: GfxBlendMode.ADD,
-        blendDstFactor: GfxBlendFactor.ONE_MINUS_SRC_ALPHA,
-        blendSrcFactor: GfxBlendFactor.SRC_ALPHA,
-    };
-    public layer: GfxRendererLayer;
-
-    constructor(public meshFragData: MeshFragData) {
-        if (this.meshFragData.transparent)
-            this.layer = GfxRendererLayer.TRANSLUCENT;
-        else
-            this.layer = GfxRendererLayer.OPAQUE;
-    }
-
-    private computeModelMatrix(camera: Camera, modelMatrix: mat4): mat4 {
-        computeViewMatrix(scratchMat4, camera);
-        mat4.mul(scratchMat4, scratchMat4, modelMatrix);
-        return scratchMat4;
-    }
-
-    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, modelMatrix: mat4, viewRenderer: Viewer.ViewerRenderInput) {
-        const renderInst = renderInstManager.pushRenderInst();
-        renderInst.setInputLayoutAndState(this.meshFragData.parent.inputLayout, this.meshFragData.inputState);
-        renderInst.drawIndexes(this.meshFragData.indexCount);
-
-        if (this.gfxProgram === null)
-            this.gfxProgram = renderInstManager.gfxRenderCache.createProgram(device, this.meshFragData.program);
-
-        renderInst.setGfxProgram(this.gfxProgram);
-        renderInst.setMegaStateFlags(this.megaStateFlags);
-        renderInst.setSamplerBindingsFromTextureMappings(this.meshFragData.textureMapping);
-        renderInst.sortKey = makeSortKey(this.layer);
-
-        let offs = renderInst.allocateUniformBuffer(GTA3Program.ub_MeshFragParams, 12 + 4 + 4);
-        const mapped = renderInst.mapUniformBufferF32(GTA3Program.ub_MeshFragParams);
-        offs += fillMatrix4x3(mapped, offs, this.computeModelMatrix(viewRenderer.camera, modelMatrix));
-        offs += fillColor(mapped, offs, this.meshFragData.baseColor);
-        offs += fillVec4v(mapped, offs, this.meshFragData.texScaleOffset);
-    }
-}
+const LAYER_SHADOWS = GfxRendererLayer.TRANSLUCENT + 1;
+const LAYER_TREES   = GfxRendererLayer.TRANSLUCENT + 2;
 
 class MeshInstance {
-    private meshFragInstance: MeshFragInstance[] = [];
     public modelMatrix = mat4.create();
 
     constructor(public meshData: MeshData, public item: ItemInstance) {
         mat4.fromRotationTranslationScale(this.modelMatrix, this.item.rotation, this.item.translation, this.item.scale);
-        mat4.fromQuat(scratchMat4, quat.fromValues(0.5, 0.5, 0.5, -0.5)); // convert Z-up to Y-up
-        mat4.multiply(this.modelMatrix, scratchMat4, this.modelMatrix);
+        // convert Z-up to Y-up
+        mat4.multiply(this.modelMatrix, mat4.fromQuat(mat4.create(), quat.fromValues(0.5, 0.5, 0.5, -0.5)), this.modelMatrix);
+    }
 
-        for (let i = 0; i < this.meshData.meshFragData.length; i++) {
-            const frag = new MeshFragInstance(this.meshData.meshFragData[i]);
-            if (meshData.obj.flags & ObjectFlags.NO_ZBUFFER_WRITE) {
-                frag.megaStateFlags.depthWrite = false;
-                frag.layer += 1;
-            } else if (meshData.obj.flags & ObjectFlags.DRAW_LAST) {
-                frag.layer += 2;
-            }
-            this.meshFragInstance[i] = frag;
+    public transparent() {
+        for (const frag of this.meshData.meshFragData)
+            if (frag.transparent) return true;
+        return false;
+    }
+
+    public layer(): GfxRendererLayer {
+        if (this.meshData.obj.flags & ObjectFlags.NO_ZBUFFER_WRITE) {
+            return LAYER_SHADOWS;
+        } else if (this.meshData.obj.flags & ObjectFlags.DRAW_LAST) {
+            return LAYER_TREES;
+        } else if (this.transparent()) {
+            return GfxRendererLayer.TRANSLUCENT;
+        } else {
+            return GfxRendererLayer.OPAQUE;
         }
     }
 
-    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput): void {
+    public visible(viewerInput: Viewer.ViewerRenderInput) {
         const hour = Math.floor(viewerInput.time / TIME_FACTOR) % 24;
         if (this.meshData.obj.tobj) {
             const timeOn = this.meshData.obj.timeOn!;
             const timeOff = this.meshData.obj.timeOff!;
-            if (timeOn < timeOff && (hour < timeOn || timeOff < hour)) return;
-            if (timeOff < timeOn && (hour < timeOn && timeOff < hour)) return;
+            if (timeOn < timeOff && (hour < timeOn || timeOff < hour)) return false;
+            if (timeOff < timeOn && (hour < timeOn && timeOff < hour)) return false;
         }
-        for (let i = 0; i < this.meshFragInstance.length; i++)
-            this.meshFragInstance[i].prepareToRender(device, renderInstManager, this.modelMatrix, viewerInput);
+        return true;
+    }
+}
+
+class MapLayer {
+    private vertexBuffer: GfxBuffer;
+    private indexBuffer: GfxBuffer;
+    private inputLayout: GfxInputLayout;
+    private inputState: GfxInputState;
+
+    private textures: GfxTexture[] = [];
+    private sampler: GfxSampler;
+
+    private vertices = 0;
+    private indices = 0;
+
+    public program = new GTA3Program();
+
+    private gfxProgram: GfxProgram | null = null;
+    private megaStateFlags: Partial<GfxMegaStateDescriptor> = {
+        blendMode: GfxBlendMode.ADD,
+        blendDstFactor: GfxBlendFactor.ONE_MINUS_SRC_ALPHA,
+        blendSrcFactor: GfxBlendFactor.SRC_ALPHA,
+    };
+
+    constructor(device: GfxDevice, meshes: MeshInstance[], public renderLayer: GfxRendererLayer) {
+        if (renderLayer === LAYER_SHADOWS) this.megaStateFlags.depthWrite = false;
+
+        for (const inst of meshes) {
+            for (const frag of inst.meshData.meshFragData) {
+                this.vertices += frag.vertices.length;
+                this.indices += frag.indices.length;
+            }
+        }
+
+        const vbuf = new Float32Array(this.vertices * 10);
+        const ibuf = new Uint32Array(this.indices);
+        let voffs = 0;
+        let ioffs = 0;
+        let lastIndex = 0;
+        for (const inst of meshes) {
+            for (const frag of inst.meshData.meshFragData) {
+                for (const vertex of frag.vertices) {
+                    const pos = vec3.transformMat4(vec3.create(), vertex.position, inst.modelMatrix);
+                    vbuf[voffs++] = pos[0];
+                    vbuf[voffs++] = pos[1];
+                    vbuf[voffs++] = pos[2];
+                    voffs += fillColor(vbuf, voffs, vertex.color);
+                    if (vertex.texCoord !== undefined) {
+                        vbuf[voffs++] = vertex.texCoord[0];
+                        vbuf[voffs++] = vertex.texCoord[1];
+                        vbuf[voffs++] = 1;
+                    } else {
+                        vbuf[voffs++] = 0;
+                        vbuf[voffs++] = 0;
+                        vbuf[voffs++] = 0;
+                    }
+                }
+                for (const index of frag.indices) {
+                    ibuf[ioffs++] = index + lastIndex;
+                }
+                lastIndex += frag.vertices.length;
+            }
+        }
+
+        this.vertexBuffer = makeStaticDataBuffer(device, GfxBufferUsage.VERTEX, vbuf.buffer);
+        this.indexBuffer  = makeStaticDataBuffer(device, GfxBufferUsage.INDEX,  ibuf.buffer);
+
+        const vertexAttributeDescriptors: GfxVertexAttributeDescriptor[] = [
+            { location: GTA3Program.a_Position,  bufferIndex: 0, format: GfxFormat.F32_RGB,  bufferByteOffset: 0 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
+            { location: GTA3Program.a_Color,     bufferIndex: 0, format: GfxFormat.F32_RGBA, bufferByteOffset: 3 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
+            { location: GTA3Program.a_TexCoord,  bufferIndex: 0, format: GfxFormat.F32_RG,   bufferByteOffset: 7 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
+            { location: GTA3Program.a_TexFactor, bufferIndex: 0, format: GfxFormat.F32_R,    bufferByteOffset: 9 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
+        ];
+        this.inputLayout = device.createInputLayout({ indexBufferFormat: GfxFormat.U32_R, vertexAttributeDescriptors });
+        const buffers = [{ buffer: this.vertexBuffer, byteOffset: 0, byteStride: 10 * 0x04}];
+        const indexBuffer = { buffer: this.indexBuffer, byteOffset: 0, byteStride: 0 };
+        this.inputState = device.createInputState(this.inputLayout, buffers, indexBuffer);
+    }
+
+    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewRenderer: Viewer.ViewerRenderInput, textureHolder: RWTextureHolder) {
+        const renderInst = renderInstManager.pushRenderInst();
+        renderInst.setInputLayoutAndState(this.inputLayout, this.inputState);
+        renderInst.drawIndexes(this.indices);
+
+        if (this.gfxProgram === null)
+            this.gfxProgram = renderInstManager.gfxRenderCache.createProgram(device, this.program);
+
+        renderInst.setGfxProgram(this.gfxProgram);
+        renderInst.setMegaStateFlags(this.megaStateFlags);
+        renderInst.setSamplerBindingsFromTextureMappings([textureHolder.atlas]);
+        renderInst.sortKey = makeSortKey(this.renderLayer);
+
+        let offs = renderInst.allocateUniformBuffer(GTA3Program.ub_MeshFragParams, 12);
+        const mapped = renderInst.mapUniformBufferF32(GTA3Program.ub_MeshFragParams);
+        offs += fillMatrix4x3(mapped, offs, viewRenderer.camera.viewMatrix);
+    }
+
+    public destroy(device: GfxDevice): void {
+        for (let i = 0; i < this.textures.length; i++) {
+            device.destroyTexture(this.textures[i]);
+        }
+        device.destroySampler(this.sampler);
+        device.destroyBuffer(this.indexBuffer);
+        device.destroyBuffer(this.vertexBuffer);
+        device.destroyInputLayout(this.inputLayout);
+        device.destroyInputState(this.inputState);
     }
 }
 
@@ -435,18 +444,29 @@ const bindingLayouts: GfxBindingLayoutDescriptor[] = [
 
 export class SceneRenderer {
     private modelCache = new ModelCache();
-    public meshInstance: MeshInstance[] = [];
+    public meshInstance = new Map<GfxRendererLayer, MeshInstance[]>();
+    public layers = new Map<GfxRendererLayer, MapLayer>();
 
-    public addModel(device: GfxDevice, textureHolder: RWTextureHolder, modelName: string, model: rw.Clump, obj: ObjectDefinition): void {
-        this.modelCache.addModel(device, textureHolder, modelName, model, obj);
+    public addModel(textureHolder: RWTextureHolder, modelName: string, model: rw.Clump, obj: ObjectDefinition): void {
+        this.modelCache.addModel(textureHolder, modelName, model, obj);
     }
 
     public addItem(item: ItemInstance): void {
         const model = this.modelCache.meshData.get(item.modelName);
-        this.meshInstance.push(new MeshInstance(assertExists(model), item));
+        const mesh = new MeshInstance(assertExists(model), item);
+        const layer = mesh.layer();
+        if (!this.meshInstance.has(layer))
+            this.meshInstance.set(layer, []);
+        this.meshInstance.get(layer)!.push(mesh);
     }
 
-    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput, ambient: Color): void {
+    public createLayers(device: GfxDevice): void {
+        for (const [layer, meshes] of this.meshInstance) {
+            this.layers.set(layer, new MapLayer(device, meshes, layer));
+        }
+    }
+
+    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput, textureHolder: RWTextureHolder, ambient: Color): void {
         const template = renderInstManager.pushTemplateRenderInst();
         template.setBindingLayouts(bindingLayouts);
 
@@ -455,14 +475,15 @@ export class SceneRenderer {
         offs += fillMatrix4x4(sceneParamsMapped, offs, viewerInput.camera.projectionMatrix);
         offs += fillColor(sceneParamsMapped, offs, ambient);
 
-        for (let i = 0; i < this.meshInstance.length; i++)
-            this.meshInstance[i].prepareToRender(device, renderInstManager, viewerInput);
+        for (const layer of this.layers.values())
+            layer.prepareToRender(device, renderInstManager, viewerInput, textureHolder);
 
         renderInstManager.popTemplateRenderInst();
     }
 
     public destroy(device: GfxDevice): void {
-        this.modelCache.destroy(device);
+        for (const layer of this.layers.values())
+            layer.destroy(device);
     }
 }
 
@@ -502,7 +523,7 @@ export class GTA3Renderer implements Viewer.SceneGfx {
         viewerInput.camera.setClipPlanes(1);
         this.renderHelper.pushTemplateRenderInst();
         for (let i = 0; i < this.sceneRenderers.length; i++)
-            this.sceneRenderers[i].prepareToRender(device, this.renderHelper.renderInstManager, viewerInput, this.ambient);
+            this.sceneRenderers[i].prepareToRender(device, this.renderHelper.renderInstManager, viewerInput, this._textureHolder, this.ambient);
         this.renderHelper.renderInstManager.popTemplateRenderInst();
         this.renderHelper.prepareToRender(device, hostAccessPass);
     }
@@ -549,7 +570,5 @@ export class GTA3Renderer implements Viewer.SceneGfx {
         this.renderHelper.destroy(device);
         this.renderTarget.destroy(device);
         this._textureHolder.destroy(device);
-        for (let i = 0; i < this.sceneRenderers.length; i++)
-            this.sceneRenderers[i].destroy(device);
     }
 }
