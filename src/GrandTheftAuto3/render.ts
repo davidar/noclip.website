@@ -186,6 +186,7 @@ class GTA3Program extends DeviceProgram {
     public static a_Color = 1;
     public static a_TexCoord = 2;
     public static a_TexFactor = 3;
+    public static a_TexScaleOffset = 4;
 
     public static ub_SceneParams = 0;
     public static ub_MeshFragParams = 1;
@@ -205,11 +206,11 @@ class MeshFragData {
     public vertices: VertexAttributes[] = [];
     public indices: Uint16Array;
     public transparent = false;
+    public texScale = vec2.fromValues(0,0);
+    public texOffset = vec2.fromValues(0,0);
 
     constructor(textureHolder: RWTextureHolder, header: rw.MeshHeader, mesh: rw.Mesh,
                 positions: Float32Array, normals: Float32Array | null, texCoords: Float32Array | null, colors: Uint8Array | null) {
-        let texScale = vec2.fromValues(0,0);
-        let texOffset = vec2.fromValues(0,0);
         const texture = mesh.material.texture;
         if (texture) {
             const texName = texture.name.toLowerCase();
@@ -217,8 +218,8 @@ class MeshFragData {
                 console.warn('Missing texture', texName);
             } else {
                 const tex = textureHolder.findTexture(texName)!;
-                texScale  = vec2.fromValues(tex.width  / textureHolder.atlas.width, tex.height / textureHolder.atlas.height);
-                texOffset = vec2.fromValues(tex.atlasX / textureHolder.atlas.width, tex.atlasY / textureHolder.atlas.height);
+                this.texScale  = vec2.fromValues(tex.width  / textureHolder.atlas.width, tex.height / textureHolder.atlas.height);
+                this.texOffset = vec2.fromValues(tex.atlasX / textureHolder.atlas.width, tex.atlasY / textureHolder.atlas.height);
                 if (rw.Raster.formatHasAlpha(texture.raster.format)) this.transparent = true;
             }
         }
@@ -240,9 +241,7 @@ class MeshFragData {
             //if (normals !== null)
             //    vertex.normal = vec3.fromValues(normals[3*i+0], normals[3*i+1], normals[3*i+2]);
             if (texCoords !== null)
-                vertex.texCoord = vec2.fromValues(
-                    (texCoords[2*i+0] % 1) * texScale[0] + texOffset[0],
-                    (texCoords[2*i+1] % 1) * texScale[1] + texOffset[1]);
+                vertex.texCoord = vec2.fromValues(texCoords[2*i+0], texCoords[2*i+1]);
             if (colors !== null)
                 colorMult(vertex.color, vertex.color, colorNew(colors[4*i+0]/0xFF, colors[4*i+1]/0xFF, colors[4*i+2]/0xFF, colors[4*i+3]/0xFF));
             this.vertices.push(vertex);
@@ -363,7 +362,7 @@ class MapLayer {
             }
         }
 
-        const vbuf = new Float32Array(this.vertices * 10);
+        const vbuf = new Float32Array(this.vertices * 14);
         const ibuf = new Uint32Array(this.indices);
         let voffs = 0;
         let ioffs = 0;
@@ -385,6 +384,7 @@ class MapLayer {
                         vbuf[voffs++] = 0;
                         vbuf[voffs++] = 0;
                     }
+                    voffs += fillVec4v(vbuf, voffs, vec4.fromValues(frag.texScale[0], frag.texScale[1], frag.texOffset[0], frag.texOffset[1]));
                 }
                 for (const index of frag.indices) {
                     ibuf[ioffs++] = index + lastIndex;
@@ -397,13 +397,14 @@ class MapLayer {
         this.indexBuffer  = makeStaticDataBuffer(device, GfxBufferUsage.INDEX,  ibuf.buffer);
 
         const vertexAttributeDescriptors: GfxVertexAttributeDescriptor[] = [
-            { location: GTA3Program.a_Position,  bufferIndex: 0, format: GfxFormat.F32_RGB,  bufferByteOffset: 0 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
-            { location: GTA3Program.a_Color,     bufferIndex: 0, format: GfxFormat.F32_RGBA, bufferByteOffset: 3 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
-            { location: GTA3Program.a_TexCoord,  bufferIndex: 0, format: GfxFormat.F32_RG,   bufferByteOffset: 7 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
-            { location: GTA3Program.a_TexFactor, bufferIndex: 0, format: GfxFormat.F32_R,    bufferByteOffset: 9 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
+            { location: GTA3Program.a_Position,       bufferIndex: 0, format: GfxFormat.F32_RGB,  bufferByteOffset:  0 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
+            { location: GTA3Program.a_Color,          bufferIndex: 0, format: GfxFormat.F32_RGBA, bufferByteOffset:  3 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
+            { location: GTA3Program.a_TexCoord,       bufferIndex: 0, format: GfxFormat.F32_RG,   bufferByteOffset:  7 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
+            { location: GTA3Program.a_TexFactor,      bufferIndex: 0, format: GfxFormat.F32_R,    bufferByteOffset:  9 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
+            { location: GTA3Program.a_TexScaleOffset, bufferIndex: 0, format: GfxFormat.F32_RGBA, bufferByteOffset: 10 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
         ];
         this.inputLayout = device.createInputLayout({ indexBufferFormat: GfxFormat.U32_R, vertexAttributeDescriptors });
-        const buffers = [{ buffer: this.vertexBuffer, byteOffset: 0, byteStride: 10 * 0x04}];
+        const buffers = [{ buffer: this.vertexBuffer, byteOffset: 0, byteStride: 14 * 0x04}];
         const indexBuffer = { buffer: this.indexBuffer, byteOffset: 0, byteStride: 0 };
         this.inputState = device.createInputState(this.inputLayout, buffers, indexBuffer);
     }
