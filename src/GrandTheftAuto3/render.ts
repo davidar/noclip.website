@@ -39,7 +39,7 @@ export class RWTexture implements TextureBase {
         this.width = image.width;
         this.height = image.height;
         this.depth = image.depth;
-        this.pixels = assertExists(image.pixels).slice();
+        this.pixels = image.pixels!.slice();
         image.delete();
     }
 }
@@ -283,7 +283,8 @@ class ModelCache {
                 node = atomic;
             }
         }
-        this.meshData.set(modelName, new MeshData(textureHolder, assertExists(node), obj));
+        if (node !== null)
+            this.meshData.set(modelName, new MeshData(textureHolder, node, obj));
     }
 }
 
@@ -447,7 +448,11 @@ export class SceneRenderer {
 
     public addItem(item: ItemInstance): void {
         const model = this.modelCache.meshData.get(item.modelName);
-        const mesh = new MeshInstance(assertExists(model), item);
+        if (model === undefined) {
+            console.warn('unable to find model', item.modelName);
+            return;
+        }
+        const mesh = new MeshInstance(model, item);
         const layerObj = mesh.layer();
         const layerStr = JSON.stringify(layerObj);
         if (!this.layerKeys.has(layerStr))

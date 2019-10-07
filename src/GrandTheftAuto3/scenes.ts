@@ -6,7 +6,7 @@ import { DataFetcher } from '../DataFetcher';
 import { GTA3Renderer, SceneRenderer } from './render';
 import { SceneContext } from '../SceneBase';
 import { getTextDecoder, assert } from '../util';
-import { parseItemPlacement, ItemPlacement, parseItemDefinition, ItemDefinition, ObjectDefinition } from './item';
+import { parseItemPlacement, ItemPlacement, parseItemDefinition, ItemDefinition, ObjectDefinition, ItemInstance } from './item';
 import { parseTimeCycle, ColorSet } from './time';
 import { quat, vec3 } from 'gl-matrix';
 
@@ -14,8 +14,25 @@ const pathBase = `GrandTheftAuto3`;
 
 class GTA3SceneDesc implements Viewer.SceneDesc {
     private static initialised = false;
+    private ids: string[];
 
     constructor(public id: string, public name: string) {
+        if (this.id === 'all') {
+            this.ids = [
+                "industne/industNE",
+                "industnw/industNW",
+                "industse/industSE",
+                "industsw/industSW",
+                "comntop/comNtop",
+                "comnbtm/comNbtm",
+                "comse/comSE",
+                "comsw/comSW",
+                "landne/landne",
+                "landsw/landsw",
+            ];
+        } else {
+            this.ids = this.id.split(';');
+        }
     }
 
     private static async initialise() {
@@ -59,20 +76,28 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
         await GTA3SceneDesc.initialise();
         const dataFetcher = context.dataFetcher;
         const objects = new Map<String, ObjectDefinition>();
+
         const ideids = ['generic', 'temppart/temppart', 'comroad/comroad', 'indroads/indroads', 'making/making', 'subroads/subroads'];
-        if (this.id.match(/\//)) ideids.push(this.id.toLowerCase());
+        for (const id of this.ids)
+            if (id.match(/\//)) ideids.push(id.toLowerCase());
         const ides = await Promise.all(ideids.map(id => this.fetchIDE(id, dataFetcher)));
         for (const ide of ides) for (const obj of ide.objects) objects.set(obj.modelName, obj);
 
-        const [colorSets, ipl] = await Promise.all([this.fetchTimeCycle(dataFetcher), this.fetchIPL(this.id, dataFetcher)]);
+        const ipls = await Promise.all(this.ids.map(id => this.fetchIPL(id, dataFetcher)));
+        const items = [] as ItemInstance[];
+        for (const ipl of ipls) for (const item of ipl.instances) {
+            const name = item.modelName;
+            if (name.startsWith('lod')) continue; // ignore LOD objects
+            items.push(item);
+        }
+
+        const colorSets = await this.fetchTimeCycle(dataFetcher);
         const renderer = new GTA3Renderer(device, colorSets);
         const sceneRenderer = new SceneRenderer();
 
         const loadedTXD = new Map<String, Promise<void>>();
-        for (const item of ipl.instances) {
+        for (const item of items) {
             const name = item.modelName;
-            if (name.startsWith('lod')) continue; // ignore LOD objects
-
             const obj = objects.get(name);
             if (!obj) {
                 console.warn('No definition for object', name);
@@ -102,10 +127,8 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
         renderer._textureHolder.buildTextureAtlas(device);
 
         const loadedDFF = new Map<String, Promise<void>>();
-        for (const item of ipl.instances) {
+        for (const item of items) {
             const name = item.modelName;
-            if (name.startsWith('lod')) continue; // ignore LOD objects
-
             const obj = objects.get(name);
             if (!obj) continue;
 
@@ -124,7 +147,7 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
             }
         }
 
-        for (const item of ipl.instances) {
+        for (const item of items) {
             const dffLoaded = loadedDFF.get(item.modelName);
             if (dffLoaded) await dffLoaded.then(() => sceneRenderer.addItem(item));
         }
@@ -138,6 +161,7 @@ const id = `GrandTheftAuto3`;
 const name = "Grand Theft Auto III";
 const sceneDescs = [
     //new GTA3SceneDesc("test", "Test"),
+    new GTA3SceneDesc("all", "All"),
     new GTA3SceneDesc("overview", "Overview"),
     "Portland",
     new GTA3SceneDesc("industne/industNE", "North-east"),
