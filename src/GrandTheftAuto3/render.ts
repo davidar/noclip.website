@@ -166,7 +166,7 @@ export class RWTextureHolder extends TextureHolder<RWTexture> {
         this.atlas.gfxSampler = device.createSampler({
             magFilter: GfxTexFilterMode.BILINEAR,
             minFilter: GfxTexFilterMode.BILINEAR,
-            mipFilter: GfxMipFilterMode.LINEAR,
+            mipFilter: GfxMipFilterMode.NO_MIP,
             minLOD: 0,
             maxLOD: 1000,
             wrapS: GfxWrapMode.CLAMP,
@@ -185,8 +185,7 @@ class GTA3Program extends DeviceProgram {
     public static a_Position = 0;
     public static a_Color = 1;
     public static a_TexCoord = 2;
-    public static a_TexFactor = 3;
-    public static a_TexScaleOffset = 4;
+    public static a_TexLocation = 3;
 
     public static ub_SceneParams = 0;
     public static ub_MeshFragParams = 1;
@@ -197,17 +196,15 @@ class GTA3Program extends DeviceProgram {
 
 interface VertexAttributes {
     position: vec3;
+    normal: vec3;
+    texCoord: vec2;
     color: Color;
-    //normal?: vec3;
-    texCoord?: vec2;
 }
-
 class MeshFragData {
     public vertices: VertexAttributes[] = [];
     public indices: Uint16Array;
     public transparent = false;
-    public texScale = vec2.fromValues(0,0);
-    public texOffset = vec2.fromValues(0,0);
+    public texLocation = vec4.fromValues(-1,-1,-1,-1);
 
     constructor(textureHolder: RWTextureHolder, header: rw.MeshHeader, mesh: rw.Mesh,
                 positions: Float32Array, normals: Float32Array | null, texCoords: Float32Array | null, colors: Uint8Array | null) {
@@ -218,8 +215,7 @@ class MeshFragData {
                 console.warn('Missing texture', texName);
             } else {
                 const tex = textureHolder.findTexture(texName)!;
-                this.texScale  = vec2.fromValues(tex.width  / textureHolder.atlas.width, tex.height / textureHolder.atlas.height);
-                this.texOffset = vec2.fromValues(tex.atlasX / textureHolder.atlas.width, tex.atlasY / textureHolder.atlas.height);
+                this.texLocation = vec4.fromValues(tex.atlasX, tex.atlasY, tex.width, tex.height);
                 if (rw.Raster.formatHasAlpha(texture.raster.format)) this.transparent = true;
             }
         }
@@ -236,10 +232,12 @@ class MeshFragData {
         for (const i of indexMap) {
             const vertex: VertexAttributes = {
                 position: vec3.fromValues(positions[3*i+0], positions[3*i+1], positions[3*i+2]),
+                normal: vec3.create(),
+                texCoord: vec2.create(),
                 color: colorNewCopy(baseColor)
             };
-            //if (normals !== null)
-            //    vertex.normal = vec3.fromValues(normals[3*i+0], normals[3*i+1], normals[3*i+2]);
+            if (normals !== null)
+                vertex.normal = vec3.fromValues(normals[3*i+0], normals[3*i+1], normals[3*i+2]);
             if (texCoords !== null)
                 vertex.texCoord = vec2.fromValues(texCoords[2*i+0], texCoords[2*i+1]);
             if (colors !== null)
@@ -362,7 +360,7 @@ class MapLayer {
             }
         }
 
-        const vbuf = new Float32Array(this.vertices * 14);
+        const vbuf = new Float32Array(this.vertices * 13);
         const ibuf = new Uint32Array(this.indices);
         let voffs = 0;
         let ioffs = 0;
@@ -375,16 +373,9 @@ class MapLayer {
                     vbuf[voffs++] = pos[1];
                     vbuf[voffs++] = pos[2];
                     voffs += fillColor(vbuf, voffs, vertex.color);
-                    if (vertex.texCoord !== undefined) {
-                        vbuf[voffs++] = vertex.texCoord[0];
-                        vbuf[voffs++] = vertex.texCoord[1];
-                        vbuf[voffs++] = 1;
-                    } else {
-                        vbuf[voffs++] = 0;
-                        vbuf[voffs++] = 0;
-                        vbuf[voffs++] = 0;
-                    }
-                    voffs += fillVec4v(vbuf, voffs, vec4.fromValues(frag.texScale[0], frag.texScale[1], frag.texOffset[0], frag.texOffset[1]));
+                    vbuf[voffs++] = vertex.texCoord[0];
+                    vbuf[voffs++] = vertex.texCoord[1];
+                    voffs += fillVec4v(vbuf, voffs, frag.texLocation);
                 }
                 for (const index of frag.indices) {
                     ibuf[ioffs++] = index + lastIndex;
@@ -397,14 +388,13 @@ class MapLayer {
         this.indexBuffer  = makeStaticDataBuffer(device, GfxBufferUsage.INDEX,  ibuf.buffer);
 
         const vertexAttributeDescriptors: GfxVertexAttributeDescriptor[] = [
-            { location: GTA3Program.a_Position,       bufferIndex: 0, format: GfxFormat.F32_RGB,  bufferByteOffset:  0 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
-            { location: GTA3Program.a_Color,          bufferIndex: 0, format: GfxFormat.F32_RGBA, bufferByteOffset:  3 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
-            { location: GTA3Program.a_TexCoord,       bufferIndex: 0, format: GfxFormat.F32_RG,   bufferByteOffset:  7 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
-            { location: GTA3Program.a_TexFactor,      bufferIndex: 0, format: GfxFormat.F32_R,    bufferByteOffset:  9 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
-            { location: GTA3Program.a_TexScaleOffset, bufferIndex: 0, format: GfxFormat.F32_RGBA, bufferByteOffset: 10 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
+            { location: GTA3Program.a_Position,    bufferIndex: 0, format: GfxFormat.F32_RGB,  bufferByteOffset: 0 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
+            { location: GTA3Program.a_Color,       bufferIndex: 0, format: GfxFormat.F32_RGBA, bufferByteOffset: 3 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
+            { location: GTA3Program.a_TexCoord,    bufferIndex: 0, format: GfxFormat.F32_RG,   bufferByteOffset: 7 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
+            { location: GTA3Program.a_TexLocation, bufferIndex: 0, format: GfxFormat.F32_RGBA, bufferByteOffset: 9 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
         ];
         this.inputLayout = device.createInputLayout({ indexBufferFormat: GfxFormat.U32_R, vertexAttributeDescriptors });
-        const buffers = [{ buffer: this.vertexBuffer, byteOffset: 0, byteStride: 14 * 0x04}];
+        const buffers = [{ buffer: this.vertexBuffer, byteOffset: 0, byteStride: 13 * 0x04}];
         const indexBuffer = { buffer: this.indexBuffer, byteOffset: 0, byteStride: 0 };
         this.inputState = device.createInputState(this.inputLayout, buffers, indexBuffer);
     }
@@ -571,5 +561,7 @@ export class GTA3Renderer implements Viewer.SceneGfx {
         this.renderHelper.destroy(device);
         this.renderTarget.destroy(device);
         this._textureHolder.destroy(device);
+        for (let i = 0; i < this.sceneRenderers.length; i++)
+            this.sceneRenderers[i].destroy(device);
     }
 }
