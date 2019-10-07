@@ -305,23 +305,26 @@ class MeshInstance {
         return false;
     }
 
-    public layer(): GfxRendererLayer {
+    public layer(): MapLayerKey {
+        let renderLayer = GfxRendererLayer.OPAQUE;
         if (this.meshData.obj.flags & ObjectFlags.NO_ZBUFFER_WRITE) {
-            return LAYER_SHADOWS;
+            renderLayer = LAYER_SHADOWS;
         } else if (this.meshData.obj.flags & ObjectFlags.DRAW_LAST) {
-            return LAYER_TREES;
+            renderLayer = LAYER_TREES;
         } else if (this.transparent()) {
-            return GfxRendererLayer.TRANSLUCENT;
+            renderLayer = GfxRendererLayer.TRANSLUCENT;
+        }
+        if (this.meshData.obj.tobj) {
+            const { timeOn, timeOff } = this.meshData.obj;
+            return { renderLayer, timeOn, timeOff };
         } else {
-            return GfxRendererLayer.OPAQUE;
+            return { renderLayer };
         }
     }
 
-    public visible(viewerInput: Viewer.ViewerRenderInput) {
+    public static visible(viewerInput: Viewer.ViewerRenderInput, timeOn?: number, timeOff?: number) {
         const hour = Math.floor(viewerInput.time / TIME_FACTOR) % 24;
-        if (this.meshData.obj.tobj) {
-            const timeOn = this.meshData.obj.timeOn!;
-            const timeOff = this.meshData.obj.timeOff!;
+        if (timeOn !== undefined && timeOff !== undefined) {
             if (timeOn < timeOff && (hour < timeOn || timeOff < hour)) return false;
             if (timeOff < timeOn && (hour < timeOn && timeOff < hour)) return false;
         }
@@ -335,13 +338,10 @@ class MapLayer {
     private inputLayout: GfxInputLayout;
     private inputState: GfxInputState;
 
-    private textures: GfxTexture[] = [];
-    private sampler: GfxSampler;
-
     private vertices = 0;
     private indices = 0;
 
-    public program = new GTA3Program();
+    private program = new GTA3Program();
 
     private gfxProgram: GfxProgram | null = null;
     private megaStateFlags: Partial<GfxMegaStateDescriptor> = {
@@ -418,15 +418,17 @@ class MapLayer {
     }
 
     public destroy(device: GfxDevice): void {
-        for (let i = 0; i < this.textures.length; i++) {
-            device.destroyTexture(this.textures[i]);
-        }
-        device.destroySampler(this.sampler);
         device.destroyBuffer(this.indexBuffer);
         device.destroyBuffer(this.vertexBuffer);
         device.destroyInputLayout(this.inputLayout);
         device.destroyInputState(this.inputState);
     }
+}
+
+interface MapLayerKey {
+    renderLayer: GfxRendererLayer;
+    timeOn?: number;
+    timeOff?: number;
 }
 
 const bindingLayouts: GfxBindingLayoutDescriptor[] = [
@@ -435,8 +437,9 @@ const bindingLayouts: GfxBindingLayoutDescriptor[] = [
 
 export class SceneRenderer {
     private modelCache = new ModelCache();
-    public meshInstance = new Map<GfxRendererLayer, MeshInstance[]>();
-    public layers = new Map<GfxRendererLayer, MapLayer>();
+    private layerKeys = new Map<string, MapLayerKey>();
+    private meshInstance = new Map<MapLayerKey, MeshInstance[]>();
+    private layers = new Map<MapLayerKey, MapLayer>();
 
     public addModel(textureHolder: RWTextureHolder, modelName: string, model: rw.Clump, obj: ObjectDefinition): void {
         this.modelCache.addModel(textureHolder, modelName, model, obj);
@@ -445,15 +448,19 @@ export class SceneRenderer {
     public addItem(item: ItemInstance): void {
         const model = this.modelCache.meshData.get(item.modelName);
         const mesh = new MeshInstance(assertExists(model), item);
-        const layer = mesh.layer();
+        const layerObj = mesh.layer();
+        const layerStr = JSON.stringify(layerObj);
+        if (!this.layerKeys.has(layerStr))
+            this.layerKeys.set(layerStr, layerObj);
+        const layer = this.layerKeys.get(layerStr)!;
         if (!this.meshInstance.has(layer))
             this.meshInstance.set(layer, []);
         this.meshInstance.get(layer)!.push(mesh);
     }
 
     public createLayers(device: GfxDevice): void {
-        for (const [layer, meshes] of this.meshInstance) {
-            this.layers.set(layer, new MapLayer(device, meshes, layer));
+        for (const [key, meshes] of this.meshInstance) {
+            this.layers.set(key, new MapLayer(device, meshes, key.renderLayer));
         }
     }
 
@@ -466,8 +473,9 @@ export class SceneRenderer {
         offs += fillMatrix4x4(sceneParamsMapped, offs, viewerInput.camera.projectionMatrix);
         offs += fillColor(sceneParamsMapped, offs, ambient);
 
-        for (const layer of this.layers.values())
-            layer.prepareToRender(device, renderInstManager, viewerInput, textureHolder);
+        for (const [key, layer] of this.layers)
+            if (MeshInstance.visible(viewerInput, key.timeOn, key.timeOff))
+                layer.prepareToRender(device, renderInstManager, viewerInput, textureHolder);
 
         renderInstManager.popTemplateRenderInst();
     }

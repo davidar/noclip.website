@@ -52,17 +52,11 @@ vec4 textureAtlasBilinear(sampler2D atlas, vec2 uv) {
 }
 
 void main() {
-    vec4 t_Color = vec4(1);
-
-    t_Color *= v_Color;
-
+    vec4 t_Color = v_Color;
     t_Color.rgb += u_AmbientColor.rgb;
-
     if (v_TexLocation.w > 0.0)
         t_Color *= textureAtlasBilinear(u_Texture[0], v_TexCoord);
-
     if (t_Color.a < 1.0/255.0) discard;
-
     gl_FragColor = t_Color;
 }
 #endif
