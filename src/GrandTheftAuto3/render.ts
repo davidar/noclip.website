@@ -164,8 +164,8 @@ export class RWTextureHolder extends TextureHolder<RWTexture> {
         this.atlas.flipY = false;
 
         this.atlas.gfxSampler = device.createSampler({
-            magFilter: GfxTexFilterMode.BILINEAR,
-            minFilter: GfxTexFilterMode.BILINEAR,
+            magFilter: GfxTexFilterMode.POINT,
+            minFilter: GfxTexFilterMode.POINT,
             mipFilter: GfxMipFilterMode.NO_MIP,
             minLOD: 0,
             maxLOD: 1000,

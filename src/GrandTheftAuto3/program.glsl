@@ -33,9 +33,22 @@ void main() {
 
 #ifdef FRAG
 vec4 textureAtlas(sampler2D atlas, vec2 uv) {
-    vec2 xy = 0.5 + v_TexLocation.xy + (v_TexLocation.zw - 1.0) * fract(uv);
-    ivec2 res = textureSize(atlas, 0);
-    return texture2D(atlas, xy / vec2(res));
+    ivec2 xy = ivec2(v_TexLocation.xy + v_TexLocation.zw * fract(uv));
+    return texelFetch(atlas, xy, 0);
+}
+
+// need to do interpolation manually on atlas to avoid bleeding/seams
+// https://www.iquilezles.org/www/articles/hwinterpolation/hwinterpolation.htm
+vec4 textureAtlasBilinear(sampler2D atlas, vec2 uv) {
+    vec2 res = v_TexLocation.zw;
+    vec2 st = uv * res - 0.5;
+    vec2 iuv = floor(st);
+    vec2 fuv = fract(st);
+    vec4 a = textureAtlas(atlas, (iuv + vec2(0.5,0.5)) / res);
+    vec4 b = textureAtlas(atlas, (iuv + vec2(1.5,0.5)) / res);
+    vec4 c = textureAtlas(atlas, (iuv + vec2(0.5,1.5)) / res);
+    vec4 d = textureAtlas(atlas, (iuv + vec2(1.5,1.5)) / res);
+    return mix(mix(a, b, fuv.x), mix(c, d, fuv.x), fuv.y);
 }
 
 void main() {
@@ -46,7 +59,7 @@ void main() {
     t_Color.rgb += u_AmbientColor.rgb;
 
     if (v_TexLocation.w > 0.0)
-        t_Color *= textureAtlas(u_Texture[0], v_TexCoord);
+        t_Color *= textureAtlasBilinear(u_Texture[0], v_TexCoord);
 
     if (t_Color.a < 1.0/255.0) discard;
 
