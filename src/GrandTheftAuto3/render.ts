@@ -24,17 +24,15 @@ import { AABB } from "../Geometry";
 
 const TIME_FACTOR = 2500; // one day cycle per minute
 
-export class RWTexture implements TextureBase {
+export class Texture implements TextureBase {
     public name: string;
     public width: number;
     public height: number;
     public depth: number;
     public pixels: Uint8Array;
-    public atlasX: number;
-    public atlasY: number;
 
-    constructor(texture: rw.Texture) {
-        this.name = texture.name.toLowerCase();
+    constructor(texture: rw.Texture, txdName: string) {
+        this.name = txdName + '/' + texture.name.toLowerCase();
         const image = texture.raster.toImage();
         image.unindex();
         this.width = image.width;
@@ -45,70 +43,19 @@ export class RWTexture implements TextureBase {
     }
 }
 
-export class RWTextureHolder extends TextureHolder<RWTexture> {
-    private textures: RWTexture[] = [];
+export class TextureAtlas extends TextureMapping {
+    public subimages = new Map<string, vec4>(); // name => x offset, y offset, width, height
 
-    public atlas = new TextureMapping();
-
-    public addTXD(device: GfxDevice, txd: rw.TexDictionary) {
-        for (let lnk = txd.textures.begin; !lnk.is(txd.textures.end); lnk = lnk.next) {
-            this.addTextures(device, [new RWTexture(rw.Texture.fromDict(lnk))]);
-        }
-    }
-
-    public loadTexture(device: GfxDevice, texture: RWTexture): LoadedTexture | null {
-        if (texture.depth < 24) {
-            console.error("16-bit texture", texture.name);
-            return null;
-        }
-        const surfaces: HTMLCanvasElement[] = [];
-
-        const canvas = document.createElement('canvas');
-        canvas.width = texture.width;
-        canvas.height = texture.height;
-
-        const ctx = canvas.getContext('2d')!;
-        const buf = ctx.createImageData(texture.width, texture.height);
-        if (texture.depth === 32) {
-            buf.data.set(texture.pixels);
-        } else {
-            for (let i = 0, j = 0; i < buf.data.length;) {
-                buf.data[i++] = texture.pixels[j++];
-                buf.data[i++] = texture.pixels[j++];
-                buf.data[i++] = texture.pixels[j++];
-                buf.data[i++] = 0xff;
-            }
-        }
-        ctx.putImageData(buf, 0, 0);
-        surfaces.push(canvas);
-
-        const gfxTexture = device.createTexture({
-            dimension: GfxTextureDimension.n2D,
-            pixelFormat: (texture.depth === 32) ? GfxFormat.U8_RGBA : GfxFormat.U8_RGB,
-            width: texture.width, height: texture.height, depth: 1, numLevels: 1
-        });
-        const hostAccessPass = device.createHostAccessPass();
-        hostAccessPass.uploadTextureData(gfxTexture, 0, [texture.pixels]);
-        device.submitPass(hostAccessPass);
-
-        const extraInfo = new Map<string, string>();
-        extraInfo.set('Colour depth', texture.depth + ' bits');
-        const viewerTexture: Viewer.Texture = { name: texture.name, surfaces, extraInfo };
-
-        this.textures.push(texture);
-
-        return { gfxTexture, viewerTexture };
-    }
-
-    public buildTextureAtlas(device: GfxDevice) {
+    constructor(device: GfxDevice, textures: Texture[]) {
+        super();
         let area = 0;
-        for (const texture of this.textures) {
+        for (const texture of textures) {
             area += texture.width * texture.height;
         }
-        assert(this.textures.length > 0);
+        assert(textures.length > 0);
 
         // Greedily place textures in order of decreasing height into row bins.
-        this.textures.sort(function(a,b) {
+        textures.sort(function(a,b) {
             if (a.height === b.height) {
                 if (a.width === b.width) {
                     return a.name < b.name ? 1 : -1;
@@ -118,27 +65,29 @@ export class RWTextureHolder extends TextureHolder<RWTexture> {
             return a.height < b.height ? 1 : -1;
         });
         const atlasWidth = Math.min(2048, 1 << Math.ceil(Math.log(Math.sqrt(area)) / Math.log(2)));
-        let atlasHeight = this.textures[0].height;
+        let atlasHeight = textures[0].height;
         let ax = 0;
         let ay = 0;
-        for (const texture of this.textures) {
+        for (const texture of textures) {
             if (texture.width > atlasWidth - ax) {
                 ax = 0;
                 ay = atlasHeight;
                 atlasHeight += texture.height;
             }
-            texture.atlasX = ax;
-            texture.atlasY = ay;
+            this.subimages.set(texture.name, vec4.fromValues(ax, ay, texture.width, texture.height));
             ax += texture.width;
         }
 
+        console.log('Creating', atlasWidth, 'x', atlasHeight, 'atlas from', textures.length, 'textures');
+
         // Finalize texture atlas after placing all textures.
         const pixels = new Uint8Array(atlasWidth * atlasHeight * 4);
-        for (const texture of this.textures) {
+        for (const texture of textures) {
+            const [atlasX, atlasY] = this.subimages.get(texture.name)!;
             for (let y = 0; y < texture.height; y++) {
                 for (let x = 0; x < texture.width; x++) {
                     const srcOffs = (y * texture.width + x) * (texture.depth / 8);
-                    const atlasOffs = ((y + texture.atlasY) * atlasWidth + x + texture.atlasX) * 4;
+                    const atlasOffs = ((y + atlasY) * atlasWidth + x + atlasX) * 4;
                     pixels[atlasOffs] = texture.pixels[srcOffs];
                     pixels[atlasOffs + 1] = texture.pixels[srcOffs + 1];
                     pixels[atlasOffs + 2] = texture.pixels[srcOffs + 2];
@@ -159,12 +108,12 @@ export class RWTextureHolder extends TextureHolder<RWTexture> {
         hostAccessPass.uploadTextureData(gfxTexture, 0, [pixels]);
         device.submitPass(hostAccessPass);
 
-        this.atlas.gfxTexture = gfxTexture;
-        this.atlas.width = atlasWidth;
-        this.atlas.height = atlasHeight;
-        this.atlas.flipY = false;
+        this.gfxTexture = gfxTexture;
+        this.width = atlasWidth;
+        this.height = atlasHeight;
+        this.flipY = false;
 
-        this.atlas.gfxSampler = device.createSampler({
+        this.gfxSampler = device.createSampler({
             magFilter: GfxTexFilterMode.POINT,
             minFilter: GfxTexFilterMode.POINT,
             mipFilter: GfxMipFilterMode.NO_MIP,
@@ -176,9 +125,8 @@ export class RWTextureHolder extends TextureHolder<RWTexture> {
     }
 
     public destroy(device: GfxDevice): void {
-        super.destroy(device);
-        if (this.atlas.gfxSampler !== null)
-            device.destroySampler(this.atlas.gfxSampler);
+        if (this.gfxSampler !== null)
+            device.destroySampler(this.gfxSampler);
     }
 }
 
@@ -204,30 +152,17 @@ interface VertexAttributes {
 class MeshFragData {
     public vertices: VertexAttributes[] = [];
     public indices: Uint16Array;
-    public transparent = false;
-    public texLocation = vec4.fromValues(-1,-1,-1,-1);
+    public texName?: string;
 
-    constructor(textureHolder: RWTextureHolder, header: rw.MeshHeader, mesh: rw.Mesh,
-                positions: Float32Array, normals: Float32Array | null, texCoords: Float32Array | null, colors: Uint8Array | null) {
+    constructor(mesh: rw.Mesh, tristrip: boolean, txdName: string, positions: Float32Array, normals: Float32Array | null, texCoords: Float32Array | null, colors: Uint8Array | null) {
         const texture = mesh.material.texture;
-        if (texture) {
-            const texName = texture.name.toLowerCase();
-            if (!textureHolder.hasTexture(texName)) {
-                console.warn('Missing texture', texName);
-            } else {
-                const tex = textureHolder.findTexture(texName)!;
-                this.texLocation = vec4.fromValues(tex.atlasX, tex.atlasY, tex.width, tex.height);
-                if (rw.Raster.formatHasAlpha(texture.raster.format)) this.transparent = true;
-            }
-        }
+        if (texture)
+            this.texName = txdName + '/' + texture.name.toLowerCase();
 
         let baseColor = colorNewCopy(White);
         const col = mesh.material.color;
         if (col)
             baseColor = colorNew(col[0] / 0xFF, col[1] / 0xFF, col[2] / 0xFF, col[3] / 0xFF);
-
-        if (baseColor.a < 1)
-            this.transparent = true;
 
         const indexMap = Array.from(new Set(mesh.indices)).sort();
         for (const i of indexMap) {
@@ -247,7 +182,7 @@ class MeshFragData {
         }
 
         this.indices = filterDegenerateTriangleIndexBuffer(convertToTriangleIndexBuffer(
-            header.tristrip ? GfxTopology.TRISTRIP : GfxTopology.TRIANGLES,
+            tristrip ? GfxTopology.TRISTRIP : GfxTopology.TRIANGLES,
             mesh.indices!.map(index => indexMap.indexOf(index))));
     }
 }
@@ -255,7 +190,7 @@ class MeshFragData {
 class MeshData {
     public meshFragData: MeshFragData[] = [];
 
-    constructor(textureHolder: RWTextureHolder, atomic: rw.Atomic, public obj: ObjectDefinition) {
+    constructor(atomic: rw.Atomic, public obj: ObjectDefinition) {
         const geom = atomic.geometry;
 
         const positions = geom.morphTarget(0).vertices!;
@@ -265,7 +200,7 @@ class MeshData {
 
         let h = geom.meshHeader;
         for (let i = 0; i < h.numMeshes; i++) {
-            const frag = new MeshFragData(textureHolder, h, h.mesh(i), positions, normals, texCoords, colors);
+            const frag = new MeshFragData(h.mesh(i), h.tristrip, obj.txdName, positions, normals, texCoords, colors);
             this.meshFragData.push(frag);
         }
     }
@@ -274,7 +209,7 @@ class MeshData {
 class ModelCache {
     public meshData = new Map<string, MeshData>();
 
-    public addModel(textureHolder: RWTextureHolder, model: rw.Clump, obj: ObjectDefinition) {
+    public addModel(model: rw.Clump, obj: ObjectDefinition) {
         let node: rw.Atomic | null = null;
         for (let lnk = model.atomics.begin; !lnk.is(model.atomics.end); lnk = lnk.next) {
             const atomic = rw.Atomic.fromClump(lnk);
@@ -285,11 +220,11 @@ class ModelCache {
             }
         }
         if (node !== null)
-            this.meshData.set(obj.modelName, new MeshData(textureHolder, node, obj));
+            this.meshData.set(obj.modelName, new MeshData(node, obj));
     }
 }
 
-class MeshInstance {
+export class MeshInstance {
     public modelMatrix = mat4.create();
 
     constructor(public meshData: MeshData, public item: ItemInstance) {
@@ -299,7 +234,18 @@ class MeshInstance {
     }
 }
 
-class MapLayer {
+export interface MapLayerKey {
+    zone: string;
+    renderLayer: GfxRendererLayer;
+    drawDistance?: number;
+    timeOn?: number;
+    timeOff?: number;
+}
+
+const LAYER_SHADOWS = GfxRendererLayer.TRANSLUCENT + 1;
+const LAYER_TREES   = GfxRendererLayer.TRANSLUCENT + 2;
+
+export class MapLayer {
     public bbox = new AABB();
 
     private vertexBuffer: GfxBuffer;
@@ -319,8 +265,8 @@ class MapLayer {
         blendSrcFactor: GfxBlendFactor.SRC_ALPHA,
     };
 
-    constructor(device: GfxDevice, meshes: MeshInstance[], public renderLayer: GfxRendererLayer) {
-        if (renderLayer === LAYER_SHADOWS) this.megaStateFlags.depthWrite = false;
+    constructor(device: GfxDevice, public key: MapLayerKey, meshes: MeshInstance[], private atlas?: TextureAtlas) {
+        if (key.renderLayer === LAYER_SHADOWS) this.megaStateFlags.depthWrite = false;
 
         for (const inst of meshes) {
             for (const frag of inst.meshData.meshFragData) {
@@ -337,6 +283,7 @@ class MapLayer {
         let lastIndex = 0;
         for (const inst of meshes) {
             for (const frag of inst.meshData.meshFragData) {
+                const texLocation = (frag.texName === undefined || atlas === undefined) ? undefined : atlas.subimages.get(frag.texName);
                 for (const vertex of frag.vertices) {
                     const pos = vec3.transformMat4(vec3.create(), vertex.position, inst.modelMatrix);
                     points.push(pos);
@@ -346,7 +293,11 @@ class MapLayer {
                     voffs += fillColor(vbuf, voffs, vertex.color);
                     vbuf[voffs++] = vertex.texCoord[0];
                     vbuf[voffs++] = vertex.texCoord[1];
-                    voffs += fillVec4v(vbuf, voffs, frag.texLocation);
+                    if (texLocation === undefined) {
+                        voffs += fillVec4v(vbuf, voffs, vec4.fromValues(-1,-1,-1,-1));
+                    } else {
+                        voffs += fillVec4v(vbuf, voffs, texLocation);
+                    }
                 }
                 for (const index of frag.indices) {
                     ibuf[ioffs++] = index + lastIndex;
@@ -371,7 +322,7 @@ class MapLayer {
         this.inputState = device.createInputState(this.inputLayout, buffers, indexBuffer);
     }
 
-    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewRenderer: Viewer.ViewerRenderInput, textureHolder: RWTextureHolder) {
+    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewRenderer: Viewer.ViewerRenderInput) {
         const renderInst = renderInstManager.pushRenderInst();
         renderInst.setInputLayoutAndState(this.inputLayout, this.inputState);
         renderInst.drawIndexes(this.indices);
@@ -381,8 +332,9 @@ class MapLayer {
 
         renderInst.setGfxProgram(this.gfxProgram);
         renderInst.setMegaStateFlags(this.megaStateFlags);
-        renderInst.setSamplerBindingsFromTextureMappings([textureHolder.atlas]);
-        renderInst.sortKey = makeSortKey(this.renderLayer);
+        if (this.atlas !== undefined)
+            renderInst.setSamplerBindingsFromTextureMappings([this.atlas]);
+        renderInst.sortKey = makeSortKey(this.key.renderLayer);
 
         let offs = renderInst.allocateUniformBuffer(GTA3Program.ub_MeshFragParams, 12);
         const mapped = renderInst.mapUniformBufferF32(GTA3Program.ub_MeshFragParams);
@@ -394,19 +346,9 @@ class MapLayer {
         device.destroyBuffer(this.vertexBuffer);
         device.destroyInputLayout(this.inputLayout);
         device.destroyInputState(this.inputState);
+        if (this.atlas) this.atlas.destroy(device);
     }
 }
-
-interface MapLayerKey {
-    zone: string;
-    renderLayer: GfxRendererLayer;
-    drawDistance?: number;
-    timeOn?: number;
-    timeOff?: number;
-}
-
-const LAYER_SHADOWS = GfxRendererLayer.TRANSLUCENT + 1;
-const LAYER_TREES   = GfxRendererLayer.TRANSLUCENT + 2;
 
 export function layerKey(obj: ObjectDefinition, zone: string): MapLayerKey {
     let renderLayer = GfxRendererLayer.OPAQUE;
@@ -426,9 +368,9 @@ export function layerKey(obj: ObjectDefinition, zone: string): MapLayerKey {
     return key;
 }
 
-function layerVisible(key: MapLayerKey, layer: MapLayer, viewerInput: Viewer.ViewerRenderInput) {
+function layerVisible(layer: MapLayer, viewerInput: Viewer.ViewerRenderInput) {
     const hour = Math.floor(viewerInput.time / TIME_FACTOR) % 24;
-    const { timeOn, timeOff } = key;
+    const { timeOn, timeOff } = layer.key;
     if (timeOn !== undefined && timeOff !== undefined) {
         if (timeOn < timeOff && (hour < timeOn || timeOff < hour)) return false;
         if (timeOff < timeOn && (hour < timeOn && timeOff < hour)) return false;
@@ -437,12 +379,12 @@ function layerVisible(key: MapLayerKey, layer: MapLayer, viewerInput: Viewer.Vie
     if (!viewerInput.camera.frustum.contains(layer.bbox))
         return false;
 
-    if (key.drawDistance !== undefined) {
+    if (layer.key.drawDistance !== undefined) {
         const nearPlane = viewerInput.camera.frustum.planes[2];
         const c = vec3.create();
         layer.bbox.centerPoint(c);
         const dist = Math.abs(nearPlane.distance(c[0], c[1], c[2]));
-        if (dist > layer.bbox.boundingSphereRadius() + 3 * key.drawDistance)
+        if (dist > layer.bbox.boundingSphereRadius() + 3 * layer.key.drawDistance)
             return false;
     }
 
@@ -454,38 +396,10 @@ const bindingLayouts: GfxBindingLayoutDescriptor[] = [
 ];
 
 export class SceneRenderer {
-    private modelCache = new ModelCache();
-    private layerKeys = new Map<string, MapLayerKey>();
-    private meshInstance = new Map<MapLayerKey, MeshInstance[]>();
-    private layers = new Map<MapLayerKey, MapLayer>();
+    public modelCache = new ModelCache();
+    public layers: MapLayer[] = [];
 
-    public addModel(textureHolder: RWTextureHolder, model: rw.Clump, obj: ObjectDefinition): void {
-        this.modelCache.addModel(textureHolder, model, obj);
-    }
-
-    public addItem(item: ItemInstance, layerObj: MapLayerKey): void {
-        const model = this.modelCache.meshData.get(item.modelName);
-        if (model === undefined) {
-            console.warn('unable to find model', item.modelName);
-            return;
-        }
-        const mesh = new MeshInstance(model, item);
-        const layerStr = JSON.stringify(layerObj);
-        if (!this.layerKeys.has(layerStr))
-            this.layerKeys.set(layerStr, layerObj);
-        const layer = this.layerKeys.get(layerStr)!;
-        if (!this.meshInstance.has(layer))
-            this.meshInstance.set(layer, []);
-        this.meshInstance.get(layer)!.push(mesh);
-    }
-
-    public createLayers(device: GfxDevice): void {
-        for (const [key, meshes] of this.meshInstance) {
-            this.layers.set(key, new MapLayer(device, meshes, key.renderLayer));
-        }
-    }
-
-    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput, textureHolder: RWTextureHolder, ambient: Color): void {
+    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput, ambient: Color): void {
         const template = renderInstManager.pushTemplateRenderInst();
         template.setBindingLayouts(bindingLayouts);
 
@@ -494,9 +408,9 @@ export class SceneRenderer {
         offs += fillMatrix4x4(sceneParamsMapped, offs, viewerInput.camera.projectionMatrix);
         offs += fillColor(sceneParamsMapped, offs, ambient);
 
-        for (const [key, layer] of this.layers)
-            if (layerVisible(key, layer, viewerInput))
-                layer.prepareToRender(device, renderInstManager, viewerInput, textureHolder);
+        for (const layer of this.layers)
+            if (layerVisible(layer, viewerInput))
+                layer.prepareToRender(device, renderInstManager, viewerInput);
 
         renderInstManager.popTemplateRenderInst();
     }
@@ -515,7 +429,6 @@ export class GTA3Renderer implements Viewer.SceneGfx {
     public sceneRenderers: SceneRenderer[] = [];
 
     private renderHelper: GfxRenderHelper;
-    public _textureHolder = new RWTextureHolder();
 
     private weather = 0;
     private scenarioSelect: UI.SingleSelect;
@@ -523,10 +436,6 @@ export class GTA3Renderer implements Viewer.SceneGfx {
 
     constructor(device: GfxDevice, private colorSets: ColorSet[]) {
         this.renderHelper = new GfxRenderHelper(device);
-    }
-
-    public addSceneRenderer(sceneRenderer: SceneRenderer): void {
-        this.sceneRenderers.push(sceneRenderer);
     }
 
     public prepareToRender(device: GfxDevice, hostAccessPass: GfxHostAccessPass, viewerInput: Viewer.ViewerRenderInput): void {
@@ -543,7 +452,7 @@ export class GTA3Renderer implements Viewer.SceneGfx {
         viewerInput.camera.setClipPlanes(1);
         this.renderHelper.pushTemplateRenderInst();
         for (let i = 0; i < this.sceneRenderers.length; i++)
-            this.sceneRenderers[i].prepareToRender(device, this.renderHelper.renderInstManager, viewerInput, this._textureHolder, this.ambient);
+            this.sceneRenderers[i].prepareToRender(device, this.renderHelper.renderInstManager, viewerInput, this.ambient);
         this.renderHelper.renderInstManager.popTemplateRenderInst();
         this.renderHelper.prepareToRender(device, hostAccessPass);
     }
@@ -589,7 +498,6 @@ export class GTA3Renderer implements Viewer.SceneGfx {
     public destroy(device: GfxDevice): void {
         this.renderHelper.destroy(device);
         this.renderTarget.destroy(device);
-        this._textureHolder.destroy(device);
         for (let i = 0; i < this.sceneRenderers.length; i++)
             this.sceneRenderers[i].destroy(device);
     }

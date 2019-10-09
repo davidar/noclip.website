@@ -3,7 +3,7 @@ import * as Viewer from '../viewer';
 import * as rw from 'librw';
 import { GfxDevice } from '../gfx/platform/GfxPlatform';
 import { DataFetcher } from '../DataFetcher';
-import { GTA3Renderer, SceneRenderer, layerKey } from './render';
+import { GTA3Renderer, SceneRenderer, layerKey, MapLayerKey, Texture, TextureAtlas, MapLayer, MeshInstance } from './render';
 import { SceneContext } from '../SceneBase';
 import { getTextDecoder, assert } from '../util';
 import { parseItemPlacement, ItemPlacement, parseItemDefinition, ItemDefinition, ObjectDefinition, ItemInstance, parseZones } from './item';
@@ -93,7 +93,10 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
         for (const ide of ides) for (const obj of ide.objects) objects.set(obj.modelName, obj);
 
         const ipls = await Promise.all(this.ids.map(id => this.fetchIPL(id, dataFetcher)));
-        const items = [] as [ItemInstance, ObjectDefinition][];
+        const [colorSets, zones] = await Promise.all([this.fetchTimeCycle(dataFetcher), this.fetchZones(dataFetcher)]);
+
+        const layerKeys = new Map<string, MapLayerKey>();
+        const layers = new Map<MapLayerKey, [ItemInstance, ObjectDefinition][]>();
         for (const ipl of ipls) for (const item of ipl.instances) {
             const name = item.modelName;
             const obj = objects.get(name);
@@ -102,50 +105,7 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
                 continue;
             }
             if (name.startsWith('lod') || name.startsWith('islandlod')) continue; // ignore LOD objects
-            items.push([item, obj]);
-        }
 
-        const [colorSets, zones] = await Promise.all([this.fetchTimeCycle(dataFetcher), this.fetchZones(dataFetcher)]);
-        const renderer = new GTA3Renderer(device, colorSets);
-        const sceneRenderer = new SceneRenderer();
-
-        const loadedTXD = new Map<String, Promise<void>>();
-        for (const [item, obj] of items) {
-            if (!loadedTXD.has(obj.txdName)) {
-                const txdPath = (obj.txdName === 'generic') ? `${pathBase}/models/generic.txd` : `${pathBase}/models/gta3/${obj.txdName}.txd`;
-                loadedTXD.set(obj.txdName, dataFetcher.fetchData(txdPath).then(buffer => {
-                    const stream = new rw.StreamMemory(buffer.arrayBuffer);
-                    const header = new rw.ChunkHeaderInfo(stream);
-                    assert(header.type === rw.PluginID.ID_TEXDICTIONARY);
-                    const txd = new rw.TexDictionary(stream);
-                    header.delete();
-                    stream.delete();
-                    renderer._textureHolder.addTXD(device, txd);
-                    txd.delete();
-                }));
-            }
-        }
-        await Promise.all(loadedTXD.values());
-        renderer._textureHolder.buildTextureAtlas(device);
-
-        const loadedDFF = new Map<String, Promise<void>>();
-        for (const [item, obj] of items) {
-            if (!loadedDFF.has(obj.modelName)) {
-                const dffPath = `${pathBase}/models/gta3/${obj.modelName}.dff`;
-                loadedDFF.set(obj.modelName, dataFetcher.fetchData(dffPath).then(async buffer => {
-                    const stream = new rw.StreamMemory(buffer.arrayBuffer);
-                    const header = new rw.ChunkHeaderInfo(stream);
-                    assert(header.type === rw.PluginID.ID_CLUMP);
-                    const clump = rw.Clump.streamRead(stream);
-                    header.delete();
-                    stream.delete();
-                    sceneRenderer.addModel(renderer._textureHolder, clump, obj);
-                    clump.delete();
-                }));
-            }
-        }
-
-        for (const [item, obj] of items) {
             let zone = 'cityzon';
             for (const [name, bb] of zones) {
                 if (bb.containsPoint(item.translation)) {
@@ -153,13 +113,82 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
                     break;
                 }
             }
-
-            const layer = layerKey(obj, zone);
-            const dffLoaded = loadedDFF.get(item.modelName);
-            if (dffLoaded !== undefined)
-                await dffLoaded.then(() => sceneRenderer.addItem(item, layer));
+            const layerObj = layerKey(obj, zone);
+            const layerStr = JSON.stringify(layerObj);
+            if (!layerKeys.has(layerStr))
+                layerKeys.set(layerStr, layerObj);
+            const layer = layerKeys.get(layerStr)!;
+            if (!layers.has(layer)) layers.set(layer, []);
+            layers.get(layer)!.push([item, obj]);
         }
-        sceneRenderer.createLayers(device);
+
+        const renderer = new GTA3Renderer(device, colorSets);
+        const sceneRenderer = new SceneRenderer();
+        const loadedTXD = new Map<string, Promise<void>>();
+        const loadedDFF = new Map<string, Promise<void>>();
+        const textures  = new Map<string, Texture>();
+        for (const [layerKey, items] of layers) (async () => {
+            const promises: Promise<void>[] = [];
+            for (const [item, obj] of items) {
+                if (!loadedTXD.has(obj.txdName)) {
+                    const txdPath = (obj.txdName === 'generic') ? `${pathBase}/models/generic.txd` : `${pathBase}/models/gta3/${obj.txdName}.txd`;
+                    loadedTXD.set(obj.txdName, dataFetcher.fetchData(txdPath).then(buffer => {
+                        const stream = new rw.StreamMemory(buffer.arrayBuffer);
+                        const header = new rw.ChunkHeaderInfo(stream);
+                        assert(header.type === rw.PluginID.ID_TEXDICTIONARY);
+                        const txd = new rw.TexDictionary(stream);
+                        header.delete();
+                        stream.delete();
+                        for (let lnk = txd.textures.begin; !lnk.is(txd.textures.end); lnk = lnk.next) {
+                            const texture = new Texture(rw.Texture.fromDict(lnk), obj.txdName);
+                            textures.set(texture.name, texture);
+                        }
+                        txd.delete();
+                    }));
+                }
+                promises.push(loadedTXD.get(obj.txdName)!);
+
+                if (!loadedDFF.has(obj.modelName)) {
+                    const dffPath = `${pathBase}/models/gta3/${obj.modelName}.dff`;
+                    loadedDFF.set(obj.modelName, dataFetcher.fetchData(dffPath).then(async buffer => {
+                        const stream = new rw.StreamMemory(buffer.arrayBuffer);
+                        const header = new rw.ChunkHeaderInfo(stream);
+                        assert(header.type === rw.PluginID.ID_CLUMP);
+                        const clump = rw.Clump.streamRead(stream);
+                        header.delete();
+                        stream.delete();
+                        sceneRenderer.modelCache.addModel(clump, obj);
+                        clump.delete();
+                    }));
+                }
+                promises.push(loadedDFF.get(obj.modelName)!);
+            }
+            await Promise.all(promises);
+
+            const layerTextures: Texture[] = [];
+            const layerMeshes: MeshInstance[] = [];
+            for (const [item, obj] of items) {
+                const model = sceneRenderer.modelCache.meshData.get(item.modelName);
+                if (model === undefined) {
+                    console.warn('Missing model', item.modelName);
+                    continue;
+                }
+                for (const frag of model.meshFragData) {
+                    if (frag.texName === undefined) continue;
+                    const texture = textures.get(frag.texName);
+                    if (texture === undefined) {
+                        console.warn('Missing texture', frag.texName, 'for', item.modelName);
+                    } else {
+                        layerTextures.push(texture);
+                    }
+                }
+                layerMeshes.push(new MeshInstance(model, item));
+            }
+            const atlas = (layerTextures.length > 0) ? new TextureAtlas(device, layerTextures) : undefined;
+            const layer = new MapLayer(device, layerKey, layerMeshes, atlas);
+            sceneRenderer.layers.push(layer);
+        })();
+
         renderer.sceneRenderers.push(sceneRenderer);
         return renderer;
     }
