@@ -400,6 +400,7 @@ class MapLayer {
 interface MapLayerKey {
     zone: string;
     renderLayer: GfxRendererLayer;
+    drawDistance?: number;
     timeOn?: number;
     timeOff?: number;
 }
@@ -407,26 +408,44 @@ interface MapLayerKey {
 const LAYER_SHADOWS = GfxRendererLayer.TRANSLUCENT + 1;
 const LAYER_TREES   = GfxRendererLayer.TRANSLUCENT + 2;
 
-export function layerKey({ flags, tobj, timeOn, timeOff }: ObjectDefinition, zone: string): MapLayerKey {
+export function layerKey(obj: ObjectDefinition, zone: string): MapLayerKey {
     let renderLayer = GfxRendererLayer.OPAQUE;
-    if (flags & ObjectFlags.NO_ZBUFFER_WRITE) {
+    if (obj.flags & ObjectFlags.NO_ZBUFFER_WRITE) {
         renderLayer = LAYER_SHADOWS;
-    } else if (flags & ObjectFlags.DRAW_LAST) {
+    } else if (obj.flags & ObjectFlags.DRAW_LAST) {
         renderLayer = LAYER_TREES;
     }
-    if (tobj) {
-        return { zone, renderLayer, timeOn, timeOff };
-    } else {
-        return { zone, renderLayer };
+    const key: MapLayerKey = { zone, renderLayer };
+    if (obj.drawDistance < 99) {
+        key.drawDistance = obj.drawDistance;
     }
+    if (obj.tobj) {
+        key.timeOn = obj.timeOn;
+        key.timeOff = obj.timeOff;
+    }
+    return key;
 }
 
-function layerVisible({ timeOn, timeOff }: MapLayerKey, time: number) {
-    const hour = Math.floor(time / TIME_FACTOR) % 24;
+function layerVisible(key: MapLayerKey, layer: MapLayer, viewerInput: Viewer.ViewerRenderInput) {
+    const hour = Math.floor(viewerInput.time / TIME_FACTOR) % 24;
+    const { timeOn, timeOff } = key;
     if (timeOn !== undefined && timeOff !== undefined) {
         if (timeOn < timeOff && (hour < timeOn || timeOff < hour)) return false;
         if (timeOff < timeOn && (hour < timeOn && timeOff < hour)) return false;
     }
+
+    if (!viewerInput.camera.frustum.contains(layer.bbox))
+        return false;
+
+    if (key.drawDistance !== undefined) {
+        const nearPlane = viewerInput.camera.frustum.planes[2];
+        const c = vec3.create();
+        layer.bbox.centerPoint(c);
+        const dist = Math.abs(nearPlane.distance(c[0], c[1], c[2]));
+        if (dist > layer.bbox.boundingSphereRadius() + 3 * key.drawDistance)
+            return false;
+    }
+
     return true;
 }
 
@@ -476,7 +495,7 @@ export class SceneRenderer {
         offs += fillColor(sceneParamsMapped, offs, ambient);
 
         for (const [key, layer] of this.layers)
-            if (layerVisible(key, viewerInput.time) && viewerInput.camera.frustum.contains(layer.bbox))
+            if (layerVisible(key, layer, viewerInput))
                 layer.prepareToRender(device, renderInstManager, viewerInput, textureHolder);
 
         renderInstManager.popTemplateRenderInst();

@@ -20,16 +20,18 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
     constructor(public id: string, public name: string) {
         if (this.id === 'all') {
             this.ids = [
-                "industne/industNE",
-                "industnw/industNW",
-                "industse/industSE",
-                "industsw/industSW",
                 "comntop/comNtop",
                 "comnbtm/comNbtm",
                 "comse/comSE",
                 "comsw/comSW",
+                "industne/industNE",
+                "industnw/industNW",
+                "industse/industSE",
+                "industsw/industSW",
                 "landne/landne",
                 "landsw/landsw",
+                "overview",
+                "props"
             ];
         } else {
             this.ids = this.id.split(';');
@@ -62,7 +64,7 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
                 scale: vec3.fromValues(10,10,10),
             }]
         };
-        const buffer = await dataFetcher.fetchData(`${pathBase}/data/maps/${id}.ipl`);
+        const buffer = await dataFetcher.fetchData((id === 'props') ? `${pathBase}/data/maps/props.IPL` : `${pathBase}/data/maps/${id}.ipl`);
         const text = getTextDecoder('utf8')!.decode(buffer.arrayBuffer);
         return parseItemPlacement(text);
     }
@@ -99,7 +101,7 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
                 console.warn('No definition for object', name);
                 continue;
             }
-            if (name.startsWith('lod')) continue; // ignore LOD objects
+            if (name.startsWith('lod') || name.startsWith('islandlod')) continue; // ignore LOD objects
             items.push([item, obj]);
         }
 
@@ -167,8 +169,7 @@ const id = `GrandTheftAuto3`;
 const name = "Grand Theft Auto III";
 const sceneDescs = [
     //new GTA3SceneDesc("test", "Test"),
-    new GTA3SceneDesc("all", "All"),
-    new GTA3SceneDesc("overview", "Overview"),
+    new GTA3SceneDesc("all", "Liberty City"),
     "Portland",
     new GTA3SceneDesc("industne/industNE", "North-east"),
     new GTA3SceneDesc("industnw/industNW", "North-west"),
