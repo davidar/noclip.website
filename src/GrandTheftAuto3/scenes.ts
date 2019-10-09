@@ -3,12 +3,13 @@ import * as Viewer from '../viewer';
 import * as rw from 'librw';
 import { GfxDevice } from '../gfx/platform/GfxPlatform';
 import { DataFetcher } from '../DataFetcher';
-import { GTA3Renderer, SceneRenderer } from './render';
+import { GTA3Renderer, SceneRenderer, layerKey } from './render';
 import { SceneContext } from '../SceneBase';
 import { getTextDecoder, assert } from '../util';
-import { parseItemPlacement, ItemPlacement, parseItemDefinition, ItemDefinition, ObjectDefinition, ItemInstance } from './item';
+import { parseItemPlacement, ItemPlacement, parseItemDefinition, ItemDefinition, ObjectDefinition, ItemInstance, parseZones } from './item';
 import { parseTimeCycle, ColorSet } from './time';
 import { quat, vec3 } from 'gl-matrix';
+import { AABB } from '../Geometry';
 
 const pathBase = `GrandTheftAuto3`;
 
@@ -72,6 +73,12 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
         return parseTimeCycle(text);
     }
 
+    private async fetchZones(dataFetcher: DataFetcher): Promise<Map<string, AABB>> {
+        const buffer = await dataFetcher.fetchData(`${pathBase}/data/gta3.zon`);
+        const text = getTextDecoder('utf8')!.decode(buffer.arrayBuffer);
+        return parseZones(text);
+    }
+
     public async createScene(device: GfxDevice, context: SceneContext): Promise<Viewer.SceneGfx> {
         await GTA3SceneDesc.initialise();
         const dataFetcher = context.dataFetcher;
@@ -84,34 +91,27 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
         for (const ide of ides) for (const obj of ide.objects) objects.set(obj.modelName, obj);
 
         const ipls = await Promise.all(this.ids.map(id => this.fetchIPL(id, dataFetcher)));
-        const items = [] as ItemInstance[];
+        const items = [] as [ItemInstance, ObjectDefinition][];
         for (const ipl of ipls) for (const item of ipl.instances) {
-            const name = item.modelName;
-            if (name.startsWith('lod')) continue; // ignore LOD objects
-            items.push(item);
-        }
-
-        const colorSets = await this.fetchTimeCycle(dataFetcher);
-        const renderer = new GTA3Renderer(device, colorSets);
-        const sceneRenderer = new SceneRenderer();
-
-        const loadedTXD = new Map<String, Promise<void>>();
-        for (const item of items) {
             const name = item.modelName;
             const obj = objects.get(name);
             if (!obj) {
                 console.warn('No definition for object', name);
                 continue;
             }
-            const txdName = obj.txdName;
-            if (!txdName) {
-                console.warn('Cannot find textures for model', name);
-                continue;
-            }
+            if (name.startsWith('lod')) continue; // ignore LOD objects
+            items.push([item, obj]);
+        }
 
-            if (!loadedTXD.has(txdName)) {
-                const txdPath = (txdName === 'generic') ? `${pathBase}/models/generic.txd` : `${pathBase}/models/gta3/${txdName}.txd`;
-                loadedTXD.set(txdName, dataFetcher.fetchData(txdPath).then(buffer => {
+        const [colorSets, zones] = await Promise.all([this.fetchTimeCycle(dataFetcher), this.fetchZones(dataFetcher)]);
+        const renderer = new GTA3Renderer(device, colorSets);
+        const sceneRenderer = new SceneRenderer();
+
+        const loadedTXD = new Map<String, Promise<void>>();
+        for (const [item, obj] of items) {
+            if (!loadedTXD.has(obj.txdName)) {
+                const txdPath = (obj.txdName === 'generic') ? `${pathBase}/models/generic.txd` : `${pathBase}/models/gta3/${obj.txdName}.txd`;
+                loadedTXD.set(obj.txdName, dataFetcher.fetchData(txdPath).then(buffer => {
                     const stream = new rw.StreamMemory(buffer.arrayBuffer);
                     const header = new rw.ChunkHeaderInfo(stream);
                     assert(header.type === rw.PluginID.ID_TEXDICTIONARY);
@@ -127,29 +127,35 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
         renderer._textureHolder.buildTextureAtlas(device);
 
         const loadedDFF = new Map<String, Promise<void>>();
-        for (const item of items) {
-            const name = item.modelName;
-            const obj = objects.get(name);
-            if (!obj) continue;
-
-            if (!loadedDFF.has(name)) {
-                const dffPath = `${pathBase}/models/gta3/${name}.dff`;
-                loadedDFF.set(name, dataFetcher.fetchData(dffPath).then(async buffer => {
+        for (const [item, obj] of items) {
+            if (!loadedDFF.has(obj.modelName)) {
+                const dffPath = `${pathBase}/models/gta3/${obj.modelName}.dff`;
+                loadedDFF.set(obj.modelName, dataFetcher.fetchData(dffPath).then(async buffer => {
                     const stream = new rw.StreamMemory(buffer.arrayBuffer);
                     const header = new rw.ChunkHeaderInfo(stream);
                     assert(header.type === rw.PluginID.ID_CLUMP);
                     const clump = rw.Clump.streamRead(stream);
                     header.delete();
                     stream.delete();
-                    sceneRenderer.addModel(renderer._textureHolder, name, clump, obj);
+                    sceneRenderer.addModel(renderer._textureHolder, clump, obj);
                     clump.delete();
                 }));
             }
         }
 
-        for (const item of items) {
+        for (const [item, obj] of items) {
+            let zone = 'cityzon';
+            for (const [name, bb] of zones) {
+                if (bb.containsPoint(item.translation)) {
+                    zone = name;
+                    break;
+                }
+            }
+
+            const layer = layerKey(obj, zone);
             const dffLoaded = loadedDFF.get(item.modelName);
-            if (dffLoaded) await dffLoaded.then(() => sceneRenderer.addItem(item));
+            if (dffLoaded !== undefined)
+                await dffLoaded.then(() => sceneRenderer.addItem(item, layer));
         }
         sceneRenderer.createLayers(device);
         renderer.sceneRenderers.push(sceneRenderer);

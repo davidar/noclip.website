@@ -20,6 +20,7 @@ import { GfxRenderInstManager, GfxRendererLayer, makeSortKey } from "../gfx/rend
 import { ItemInstance, ObjectDefinition, ObjectFlags } from "./item";
 import { Color, colorNew, White, colorNewCopy, colorLerp, colorMult } from "../Color";
 import { ColorSet } from "./time";
+import { AABB } from "../Geometry";
 
 const TIME_FACTOR = 2500; // one day cycle per minute
 
@@ -273,7 +274,7 @@ class MeshData {
 class ModelCache {
     public meshData = new Map<string, MeshData>();
 
-    public addModel(textureHolder: RWTextureHolder, modelName: string, model: rw.Clump, obj: ObjectDefinition) {
+    public addModel(textureHolder: RWTextureHolder, model: rw.Clump, obj: ObjectDefinition) {
         let node: rw.Atomic | null = null;
         for (let lnk = model.atomics.begin; !lnk.is(model.atomics.end); lnk = lnk.next) {
             const atomic = rw.Atomic.fromClump(lnk);
@@ -284,12 +285,9 @@ class ModelCache {
             }
         }
         if (node !== null)
-            this.meshData.set(modelName, new MeshData(textureHolder, node, obj));
+            this.meshData.set(obj.modelName, new MeshData(textureHolder, node, obj));
     }
 }
-
-const LAYER_SHADOWS = GfxRendererLayer.TRANSLUCENT + 1;
-const LAYER_TREES   = GfxRendererLayer.TRANSLUCENT + 2;
 
 class MeshInstance {
     public modelMatrix = mat4.create();
@@ -299,41 +297,11 @@ class MeshInstance {
         // convert Z-up to Y-up
         mat4.multiply(this.modelMatrix, mat4.fromQuat(mat4.create(), quat.fromValues(0.5, 0.5, 0.5, -0.5)), this.modelMatrix);
     }
-
-    public transparent() {
-        for (const frag of this.meshData.meshFragData)
-            if (frag.transparent) return true;
-        return false;
-    }
-
-    public layer(): MapLayerKey {
-        let renderLayer = GfxRendererLayer.OPAQUE;
-        if (this.meshData.obj.flags & ObjectFlags.NO_ZBUFFER_WRITE) {
-            renderLayer = LAYER_SHADOWS;
-        } else if (this.meshData.obj.flags & ObjectFlags.DRAW_LAST) {
-            renderLayer = LAYER_TREES;
-        } else if (this.transparent()) {
-            renderLayer = GfxRendererLayer.TRANSLUCENT;
-        }
-        if (this.meshData.obj.tobj) {
-            const { timeOn, timeOff } = this.meshData.obj;
-            return { renderLayer, timeOn, timeOff };
-        } else {
-            return { renderLayer };
-        }
-    }
-
-    public static visible(viewerInput: Viewer.ViewerRenderInput, timeOn?: number, timeOff?: number) {
-        const hour = Math.floor(viewerInput.time / TIME_FACTOR) % 24;
-        if (timeOn !== undefined && timeOff !== undefined) {
-            if (timeOn < timeOff && (hour < timeOn || timeOff < hour)) return false;
-            if (timeOff < timeOn && (hour < timeOn && timeOff < hour)) return false;
-        }
-        return true;
-    }
 }
 
 class MapLayer {
+    public bbox = new AABB();
+
     private vertexBuffer: GfxBuffer;
     private indexBuffer: GfxBuffer;
     private inputLayout: GfxInputLayout;
@@ -361,6 +329,7 @@ class MapLayer {
             }
         }
 
+        const points = [] as vec3[];
         const vbuf = new Float32Array(this.vertices * 13);
         const ibuf = new Uint32Array(this.indices);
         let voffs = 0;
@@ -370,6 +339,7 @@ class MapLayer {
             for (const frag of inst.meshData.meshFragData) {
                 for (const vertex of frag.vertices) {
                     const pos = vec3.transformMat4(vec3.create(), vertex.position, inst.modelMatrix);
+                    points.push(pos);
                     vbuf[voffs++] = pos[0];
                     vbuf[voffs++] = pos[1];
                     vbuf[voffs++] = pos[2];
@@ -385,6 +355,7 @@ class MapLayer {
             }
         }
 
+        this.bbox.set(points);
         this.vertexBuffer = makeStaticDataBuffer(device, GfxBufferUsage.VERTEX, vbuf.buffer);
         this.indexBuffer  = makeStaticDataBuffer(device, GfxBufferUsage.INDEX,  ibuf.buffer);
 
@@ -427,9 +398,36 @@ class MapLayer {
 }
 
 interface MapLayerKey {
+    zone: string;
     renderLayer: GfxRendererLayer;
     timeOn?: number;
     timeOff?: number;
+}
+
+const LAYER_SHADOWS = GfxRendererLayer.TRANSLUCENT + 1;
+const LAYER_TREES   = GfxRendererLayer.TRANSLUCENT + 2;
+
+export function layerKey({ flags, tobj, timeOn, timeOff }: ObjectDefinition, zone: string): MapLayerKey {
+    let renderLayer = GfxRendererLayer.OPAQUE;
+    if (flags & ObjectFlags.NO_ZBUFFER_WRITE) {
+        renderLayer = LAYER_SHADOWS;
+    } else if (flags & ObjectFlags.DRAW_LAST) {
+        renderLayer = LAYER_TREES;
+    }
+    if (tobj) {
+        return { zone, renderLayer, timeOn, timeOff };
+    } else {
+        return { zone, renderLayer };
+    }
+}
+
+function layerVisible({ timeOn, timeOff }: MapLayerKey, time: number) {
+    const hour = Math.floor(time / TIME_FACTOR) % 24;
+    if (timeOn !== undefined && timeOff !== undefined) {
+        if (timeOn < timeOff && (hour < timeOn || timeOff < hour)) return false;
+        if (timeOff < timeOn && (hour < timeOn && timeOff < hour)) return false;
+    }
+    return true;
 }
 
 const bindingLayouts: GfxBindingLayoutDescriptor[] = [
@@ -442,18 +440,17 @@ export class SceneRenderer {
     private meshInstance = new Map<MapLayerKey, MeshInstance[]>();
     private layers = new Map<MapLayerKey, MapLayer>();
 
-    public addModel(textureHolder: RWTextureHolder, modelName: string, model: rw.Clump, obj: ObjectDefinition): void {
-        this.modelCache.addModel(textureHolder, modelName, model, obj);
+    public addModel(textureHolder: RWTextureHolder, model: rw.Clump, obj: ObjectDefinition): void {
+        this.modelCache.addModel(textureHolder, model, obj);
     }
 
-    public addItem(item: ItemInstance): void {
+    public addItem(item: ItemInstance, layerObj: MapLayerKey): void {
         const model = this.modelCache.meshData.get(item.modelName);
         if (model === undefined) {
             console.warn('unable to find model', item.modelName);
             return;
         }
         const mesh = new MeshInstance(model, item);
-        const layerObj = mesh.layer();
         const layerStr = JSON.stringify(layerObj);
         if (!this.layerKeys.has(layerStr))
             this.layerKeys.set(layerStr, layerObj);
@@ -479,7 +476,7 @@ export class SceneRenderer {
         offs += fillColor(sceneParamsMapped, offs, ambient);
 
         for (const [key, layer] of this.layers)
-            if (MeshInstance.visible(viewerInput, key.timeOn, key.timeOff))
+            if (layerVisible(key, viewerInput.time) && viewerInput.camera.frustum.contains(layer.bbox))
                 layer.prepareToRender(device, renderInstManager, viewerInput, textureHolder);
 
         renderInstManager.popTemplateRenderInst();
