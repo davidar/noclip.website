@@ -33,30 +33,45 @@ void main() {
 #endif
 
 #ifdef FRAG
-vec4 textureAtlas(sampler2D atlas, vec2 uv) {
+vec4 textureAtlas(sampler2D atlas, vec2 uv, int lod) {
     ivec2 xy = ivec2(v_TexLocation.xy + v_TexLocation.zw * fract(uv));
-    return texelFetch(atlas, xy, 0);
+    return texelFetch(atlas, xy >> lod, lod);
 }
 
 // need to do interpolation manually on atlas to avoid bleeding/seams
 // https://www.iquilezles.org/www/articles/hwinterpolation/hwinterpolation.htm
-vec4 textureAtlasBilinear(sampler2D atlas, vec2 uv) {
-    vec2 res = v_TexLocation.zw;
+vec4 textureAtlasBilinear(sampler2D atlas, vec2 uv, int lod) {
+    vec2 res = v_TexLocation.zw / pow(2.0, float(lod));
     vec2 st = uv * res - 0.5;
     vec2 iuv = floor(st);
     vec2 fuv = fract(st);
-    vec4 a = textureAtlas(atlas, (iuv + vec2(0.5,0.5)) / res);
-    vec4 b = textureAtlas(atlas, (iuv + vec2(1.5,0.5)) / res);
-    vec4 c = textureAtlas(atlas, (iuv + vec2(0.5,1.5)) / res);
-    vec4 d = textureAtlas(atlas, (iuv + vec2(1.5,1.5)) / res);
+    vec4 a = textureAtlas(atlas, (iuv + vec2(0.5,0.5)) / res, lod);
+    vec4 b = textureAtlas(atlas, (iuv + vec2(1.5,0.5)) / res, lod);
+    vec4 c = textureAtlas(atlas, (iuv + vec2(0.5,1.5)) / res, lod);
+    vec4 d = textureAtlas(atlas, (iuv + vec2(1.5,1.5)) / res, lod);
     return mix(mix(a, b, fuv.x), mix(c, d, fuv.x), fuv.y);
+}
+
+float mip_map_level(in vec2 texture_coordinate) {
+    // The OpenGL Graphics System: A Specification 4.2 - chapter 3.9.11, equation 3.21
+    vec2  dx_vtc        = dFdx(texture_coordinate);
+    vec2  dy_vtc        = dFdy(texture_coordinate);
+    float delta_max_sqr = max(dot(dx_vtc, dx_vtc), dot(dy_vtc, dy_vtc));
+    return 0.5 * log2(delta_max_sqr);
+}
+
+vec4 textureAtlasTrilinear(sampler2D atlas, vec2 uv) {
+    float lod = clamp(mip_map_level(uv * v_TexLocation.zw), 0.0, 6.0);
+    vec4 a = textureAtlasBilinear(atlas, uv, int(floor(lod)));
+    vec4 b = textureAtlasBilinear(atlas, uv, int(ceil(lod)));
+    return mix(a, b, fract(lod));
 }
 
 void main() {
     vec4 t_Color = v_Color;
     t_Color.rgb += u_AmbientColor.rgb;
     if (v_TexLocation.w > 0.0)
-        t_Color *= textureAtlasBilinear(u_Texture[0], v_TexCoord);
+        t_Color *= textureAtlasTrilinear(u_Texture[0], v_TexCoord);
     if (alphaThreshold >= 0.0 ? t_Color.a < alphaThreshold : t_Color.a >= -alphaThreshold) discard;
     gl_FragColor = t_Color;
 }

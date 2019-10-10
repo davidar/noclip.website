@@ -43,6 +43,22 @@ export class Texture implements TextureBase {
     }
 }
 
+function halve(px: Uint8Array, width: number, height: number): Uint8Array {
+    const halved = new Uint8Array(width * height);
+    for (let y = 0; y < height/2; y++) {
+        for (let x = 0; x < width/2; x++) {
+            for (let i = 0; i < 4; i++) {
+                halved[4 * (x + y * width/2) + i] =
+                    ( px[4 * ((2*x+0) + (2*y+0) * width) + i]
+                    + px[4 * ((2*x+1) + (2*y+0) * width) + i]
+                    + px[4 * ((2*x+0) + (2*y+1) * width) + i]
+                    + px[4 * ((2*x+1) + (2*y+1) * width) + i] ) / 4;
+            }
+        }
+    }
+    return halved;
+}
+
 export class TextureAtlas extends TextureMapping {
     public subimages = new Map<string, vec4>(); // name => x offset, y offset, width, height
 
@@ -99,13 +115,26 @@ export class TextureAtlas extends TextureMapping {
                 }
             }
         }
+
+        // Generate mipmaps.
+        const levelDatas = [pixels];
+        let mip = pixels;
+        let w = atlasWidth;
+        let h = atlasHeight;
+        for (let i = 1; i < 7; i++) {
+            mip = halve(mip, w, h);
+            levelDatas.push(mip);
+            w = Math.max((w / 2) | 0, 1);
+            h = Math.max((h / 2) | 0, 1);
+        }
+
         const gfxTexture = device.createTexture({
             dimension: GfxTextureDimension.n2D, pixelFormat: GfxFormat.U8_RGBA,
-            width: atlasWidth, height: atlasHeight, depth: 1, numLevels: 1
+            width: atlasWidth, height: atlasHeight, depth: 1, numLevels: levelDatas.length
         });
         device.setResourceName(gfxTexture, `textureAtlas`);
         const hostAccessPass = device.createHostAccessPass();
-        hostAccessPass.uploadTextureData(gfxTexture, 0, [pixels]);
+        hostAccessPass.uploadTextureData(gfxTexture, 0, levelDatas);
         device.submitPass(hostAccessPass);
 
         this.gfxTexture = gfxTexture;
@@ -116,7 +145,7 @@ export class TextureAtlas extends TextureMapping {
         this.gfxSampler = device.createSampler({
             magFilter: GfxTexFilterMode.POINT,
             minFilter: GfxTexFilterMode.POINT,
-            mipFilter: GfxMipFilterMode.NO_MIP,
+            mipFilter: GfxMipFilterMode.NEAREST,
             minLOD: 0,
             maxLOD: 1000,
             wrapS: GfxWrapMode.CLAMP,
