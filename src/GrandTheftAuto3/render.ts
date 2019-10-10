@@ -368,7 +368,7 @@ export class SceneRenderer {
         return true;
     }
 
-    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput): void {
+    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput, dual: boolean): void {
         if (!this.visible(viewerInput)) return;
 
         const renderInst = renderInstManager.pushRenderInst();
@@ -380,13 +380,15 @@ export class SceneRenderer {
 
         renderInst.setGfxProgram(this.gfxProgram);
         renderInst.setMegaStateFlags(this.megaStateFlags);
+        if (dual) renderInst.setMegaStateFlags({ depthWrite: false });
         if (this.atlas !== undefined)
             renderInst.setSamplerBindingsFromTextureMappings([this.atlas]);
         renderInst.sortKey = makeSortKey(this.key.renderLayer);
 
-        let offs = renderInst.allocateUniformBuffer(GTA3Program.ub_MeshFragParams, 12);
+        let offs = renderInst.allocateUniformBuffer(GTA3Program.ub_MeshFragParams, 12 + 4);
         const mapped = renderInst.mapUniformBufferF32(GTA3Program.ub_MeshFragParams);
         offs += fillMatrix4x3(mapped, offs, viewerInput.camera.viewMatrix);
+        mapped[offs++] = (this.key.renderLayer !== DrawKey.LAYER_TREES) ? 0.01 : dual ? -0.9 : 0.9;
     }
 
     public destroy(device: GfxDevice): void {
@@ -440,8 +442,13 @@ export class GTA3Renderer implements Viewer.SceneGfx {
         offs += fillMatrix4x4(sceneParamsMapped, offs, viewerInput.camera.projectionMatrix);
         offs += fillColor(sceneParamsMapped, offs, this.ambient);
 
-        for (const sceneRenderer of this.sceneRenderers)
-            sceneRenderer.prepareToRender(device, this.renderHelper.renderInstManager, viewerInput);
+        for (const sceneRenderer of this.sceneRenderers) {
+            sceneRenderer.prepareToRender(device, this.renderHelper.renderInstManager, viewerInput, false);
+            if (sceneRenderer.key.renderLayer === DrawKey.LAYER_TREES) {
+                // PS2 alpha test emulation, see http://skygfx.rockstarvision.com/skygfx.html
+                sceneRenderer.prepareToRender(device, this.renderHelper.renderInstManager, viewerInput, true);
+            }
+        }
 
         this.renderHelper.renderInstManager.popTemplateRenderInst();
         this.renderHelper.renderInstManager.popTemplateRenderInst();
