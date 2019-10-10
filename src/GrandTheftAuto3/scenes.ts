@@ -3,7 +3,7 @@ import * as Viewer from '../viewer';
 import * as rw from 'librw';
 import { GfxDevice } from '../gfx/platform/GfxPlatform';
 import { DataFetcher } from '../DataFetcher';
-import { GTA3Renderer, SceneRenderer, layerKey, MapLayerKey, Texture, TextureAtlas, MapLayer, MeshInstance } from './render';
+import { GTA3Renderer, SceneRenderer, DrawKey, Texture, TextureAtlas, MeshInstance } from './render';
 import { SceneContext } from '../SceneBase';
 import { getTextDecoder, assert } from '../util';
 import { parseItemPlacement, ItemPlacement, parseItemDefinition, ItemDefinition, ObjectDefinition, ItemInstance, parseZones } from './item';
@@ -95,8 +95,8 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
         const ipls = await Promise.all(this.ids.map(id => this.fetchIPL(id, dataFetcher)));
         const [colorSets, zones] = await Promise.all([this.fetchTimeCycle(dataFetcher), this.fetchZones(dataFetcher)]);
 
-        const layerKeys = new Map<string, MapLayerKey>();
-        const layers = new Map<MapLayerKey, [ItemInstance, ObjectDefinition][]>();
+        const drawKeys = new Map<string, DrawKey>();
+        const layers = new Map<DrawKey, [ItemInstance, ObjectDefinition][]>();
         for (const ipl of ipls) for (const item of ipl.instances) {
             const name = item.modelName;
             const obj = objects.get(name);
@@ -113,21 +113,20 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
                     break;
                 }
             }
-            const layerObj = layerKey(obj, zone);
-            const layerStr = JSON.stringify(layerObj);
-            if (!layerKeys.has(layerStr))
-                layerKeys.set(layerStr, layerObj);
-            const layer = layerKeys.get(layerStr)!;
-            if (!layers.has(layer)) layers.set(layer, []);
-            layers.get(layer)!.push([item, obj]);
+            const drawKeyObj = new DrawKey(obj, zone);
+            const drawKeyStr = JSON.stringify(drawKeyObj);
+            if (!drawKeys.has(drawKeyStr))
+                drawKeys.set(drawKeyStr, drawKeyObj);
+            const drawKey = drawKeys.get(drawKeyStr)!;
+            if (!layers.has(drawKey)) layers.set(drawKey, []);
+            layers.get(drawKey)!.push([item, obj]);
         }
 
         const renderer = new GTA3Renderer(device, colorSets);
-        const sceneRenderer = new SceneRenderer();
         const loadedTXD = new Map<string, Promise<void>>();
         const loadedDFF = new Map<string, Promise<void>>();
         const textures  = new Map<string, Texture>();
-        for (const [layerKey, items] of layers) (async () => {
+        for (const [drawKey, items] of layers) (async () => {
             const promises: Promise<void>[] = [];
             for (const [item, obj] of items) {
                 if (!loadedTXD.has(obj.txdName)) {
@@ -157,7 +156,7 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
                         const clump = rw.Clump.streamRead(stream);
                         header.delete();
                         stream.delete();
-                        sceneRenderer.modelCache.addModel(clump, obj);
+                        renderer.modelCache.addModel(clump, obj);
                         clump.delete();
                     }));
                 }
@@ -168,7 +167,7 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
             const layerTextures: Texture[] = [];
             const layerMeshes: MeshInstance[] = [];
             for (const [item, obj] of items) {
-                const model = sceneRenderer.modelCache.meshData.get(item.modelName);
+                const model = renderer.modelCache.meshData.get(item.modelName);
                 if (model === undefined) {
                     console.warn('Missing model', item.modelName);
                     continue;
@@ -185,11 +184,10 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
                 layerMeshes.push(new MeshInstance(model, item));
             }
             const atlas = (layerTextures.length > 0) ? new TextureAtlas(device, layerTextures) : undefined;
-            const layer = new MapLayer(device, layerKey, layerMeshes, atlas);
-            sceneRenderer.layers.push(layer);
+            const sceneRenderer = new SceneRenderer(device, drawKey, layerMeshes, atlas);
+            renderer.sceneRenderers.push(sceneRenderer);
         })();
 
-        renderer.sceneRenderers.push(sceneRenderer);
         return renderer;
     }
 }

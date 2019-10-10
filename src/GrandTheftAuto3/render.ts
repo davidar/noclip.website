@@ -143,47 +143,57 @@ class GTA3Program extends DeviceProgram {
     public both = GTA3Program.program;
 }
 
-interface VertexAttributes {
-    position: vec3;
-    normal: vec3;
-    texCoord: vec2;
-    color: Color;
-}
+const program = new GTA3Program();
+
 class MeshFragData {
-    public vertices: VertexAttributes[] = [];
     public indices: Uint16Array;
     public texName?: string;
 
-    constructor(mesh: rw.Mesh, tristrip: boolean, txdName: string, positions: Float32Array, normals: Float32Array | null, texCoords: Float32Array | null, colors: Uint8Array | null) {
+    private baseColor = colorNewCopy(White);
+    private indexMap: number[];
+
+    constructor(mesh: rw.Mesh, tristrip: boolean, txdName: string,
+                private positions: Float32Array, private texCoords: Float32Array | null, private colors: Uint8Array | null) {
         const texture = mesh.material.texture;
         if (texture)
             this.texName = txdName + '/' + texture.name.toLowerCase();
 
-        let baseColor = colorNewCopy(White);
         const col = mesh.material.color;
         if (col)
-            baseColor = colorNew(col[0] / 0xFF, col[1] / 0xFF, col[2] / 0xFF, col[3] / 0xFF);
+            this.baseColor = colorNew(col[0] / 0xFF, col[1] / 0xFF, col[2] / 0xFF, col[3] / 0xFF);
 
-        const indexMap = Array.from(new Set(mesh.indices)).sort();
-        for (const i of indexMap) {
-            const vertex: VertexAttributes = {
-                position: vec3.fromValues(positions[3*i+0], positions[3*i+1], positions[3*i+2]),
-                normal: vec3.create(),
-                texCoord: vec2.create(),
-                color: colorNewCopy(baseColor)
-            };
-            if (normals !== null)
-                vertex.normal = vec3.fromValues(normals[3*i+0], normals[3*i+1], normals[3*i+2]);
-            if (texCoords !== null)
-                vertex.texCoord = vec2.fromValues(texCoords[2*i+0], texCoords[2*i+1]);
-            if (colors !== null)
-                colorMult(vertex.color, vertex.color, colorNew(colors[4*i+0]/0xFF, colors[4*i+1]/0xFF, colors[4*i+2]/0xFF, colors[4*i+3]/0xFF));
-            this.vertices.push(vertex);
-        }
+        this.indexMap = Array.from(new Set(mesh.indices)).sort();
 
         this.indices = filterDegenerateTriangleIndexBuffer(convertToTriangleIndexBuffer(
             tristrip ? GfxTopology.TRISTRIP : GfxTopology.TRIANGLES,
-            mesh.indices!.map(index => indexMap.indexOf(index))));
+            mesh.indices!.map(index => this.indexMap.indexOf(index))));
+    }
+
+    public vertices() {
+        return this.indexMap.length;
+    }
+
+    public position(index: number) {
+        const i = this.indexMap[index];
+        return vec3.fromValues(this.positions[3*i+0], this.positions[3*i+1], this.positions[3*i+2]);
+    }
+
+    public color(index: number) {
+        const i = this.indexMap[index];
+        const color = colorNewCopy(this.baseColor);
+        if (this.colors !== null)
+            colorMult(color, color, colorNew(this.colors[4*i+0]/0xFF, this.colors[4*i+1]/0xFF, this.colors[4*i+2]/0xFF, this.colors[4*i+3]/0xFF));
+        return color;
+    }
+
+    public texCoord(index: number) {
+        const i = this.indexMap[index];
+        const texCoord = vec2.create();
+        if (this.texCoords !== null) {
+            texCoord[0] = this.texCoords[2*i+0]
+            texCoord[1] = this.texCoords[2*i+1];
+        }
+        return texCoord;
     }
 }
 
@@ -193,14 +203,13 @@ class MeshData {
     constructor(atomic: rw.Atomic, public obj: ObjectDefinition) {
         const geom = atomic.geometry;
 
-        const positions = geom.morphTarget(0).vertices!;
-        const normals = geom.morphTarget(0).normals;
-        const texCoords = (geom.numTexCoordSets > 0) ? geom.texCoords(0) : null;
-        const colors = geom.colors;
+        const positions = geom.morphTarget(0).vertices!.slice();
+        const texCoords = (geom.numTexCoordSets > 0) ? geom.texCoords(0)!.slice() : null;
+        const colors = (geom.colors !== null) ? geom.colors.slice() : null;
 
         let h = geom.meshHeader;
         for (let i = 0; i < h.numMeshes; i++) {
-            const frag = new MeshFragData(h.mesh(i), h.tristrip, obj.txdName, positions, normals, texCoords, colors);
+            const frag = new MeshFragData(h.mesh(i), h.tristrip, obj.txdName, positions, texCoords, colors);
             this.meshFragData.push(frag);
         }
     }
@@ -234,43 +243,55 @@ export class MeshInstance {
     }
 }
 
-export interface MapLayerKey {
-    zone: string;
-    renderLayer: GfxRendererLayer;
-    drawDistance?: number;
-    timeOn?: number;
-    timeOff?: number;
+export class DrawKey {
+    public static readonly LAYER_SHADOWS = GfxRendererLayer.TRANSLUCENT + 1;
+    public static readonly LAYER_TREES   = GfxRendererLayer.TRANSLUCENT + 2;
+
+    public renderLayer: GfxRendererLayer = GfxRendererLayer.OPAQUE;
+    public drawDistance?: number;
+    public timeOn?: number;
+    public timeOff?: number;
+
+    constructor(obj: ObjectDefinition, public zone: string) {
+        if (obj.flags & ObjectFlags.NO_ZBUFFER_WRITE) {
+            this.renderLayer = DrawKey.LAYER_SHADOWS;
+        } else if (obj.flags & ObjectFlags.DRAW_LAST) {
+            this.renderLayer = DrawKey.LAYER_TREES;
+        }
+        if (obj.drawDistance < 99) {
+            this.drawDistance = 99;
+        }
+        if (obj.tobj) {
+            this.timeOn = obj.timeOn;
+            this.timeOff = obj.timeOff;
+        }
+    }
 }
 
-const LAYER_SHADOWS = GfxRendererLayer.TRANSLUCENT + 1;
-const LAYER_TREES   = GfxRendererLayer.TRANSLUCENT + 2;
-
-export class MapLayer {
+export class SceneRenderer {
     public bbox = new AABB();
 
     private vertexBuffer: GfxBuffer;
     private indexBuffer: GfxBuffer;
     private inputLayout: GfxInputLayout;
     private inputState: GfxInputState;
+    private gfxProgram?: GfxProgram;
 
-    private vertices = 0;
-    private indices = 0;
-
-    private program = new GTA3Program();
-
-    private gfxProgram: GfxProgram | null = null;
     private megaStateFlags: Partial<GfxMegaStateDescriptor> = {
         blendMode: GfxBlendMode.ADD,
         blendDstFactor: GfxBlendFactor.ONE_MINUS_SRC_ALPHA,
         blendSrcFactor: GfxBlendFactor.SRC_ALPHA,
     };
 
-    constructor(device: GfxDevice, public key: MapLayerKey, meshes: MeshInstance[], private atlas?: TextureAtlas) {
-        if (key.renderLayer === LAYER_SHADOWS) this.megaStateFlags.depthWrite = false;
+    private vertices = 0;
+    private indices = 0;
+
+    constructor(device: GfxDevice, public key: DrawKey, meshes: MeshInstance[], private atlas?: TextureAtlas) {
+        if (key.renderLayer === DrawKey.LAYER_SHADOWS) this.megaStateFlags.depthWrite = false;
 
         for (const inst of meshes) {
             for (const frag of inst.meshData.meshFragData) {
-                this.vertices += frag.vertices.length;
+                this.vertices += frag.vertices();
                 this.indices += frag.indices.length;
             }
         }
@@ -283,16 +304,18 @@ export class MapLayer {
         let lastIndex = 0;
         for (const inst of meshes) {
             for (const frag of inst.meshData.meshFragData) {
+                const n = frag.vertices();
                 const texLocation = (frag.texName === undefined || atlas === undefined) ? undefined : atlas.subimages.get(frag.texName);
-                for (const vertex of frag.vertices) {
-                    const pos = vec3.transformMat4(vec3.create(), vertex.position, inst.modelMatrix);
+                for (let i = 0; i < n; i++) {
+                    const pos = vec3.transformMat4(vec3.create(), frag.position(i), inst.modelMatrix);
                     points.push(pos);
                     vbuf[voffs++] = pos[0];
                     vbuf[voffs++] = pos[1];
                     vbuf[voffs++] = pos[2];
-                    voffs += fillColor(vbuf, voffs, vertex.color);
-                    vbuf[voffs++] = vertex.texCoord[0];
-                    vbuf[voffs++] = vertex.texCoord[1];
+                    voffs += fillColor(vbuf, voffs, frag.color(i));
+                    const texCoord = frag.texCoord(i);
+                    vbuf[voffs++] = texCoord[0];
+                    vbuf[voffs++] = texCoord[1];
                     if (texLocation === undefined) {
                         voffs += fillVec4v(vbuf, voffs, vec4.fromValues(-1,-1,-1,-1));
                     } else {
@@ -302,7 +325,7 @@ export class MapLayer {
                 for (const index of frag.indices) {
                     ibuf[ioffs++] = index + lastIndex;
                 }
-                lastIndex += frag.vertices.length;
+                lastIndex += n;
             }
         }
 
@@ -322,13 +345,38 @@ export class MapLayer {
         this.inputState = device.createInputState(this.inputLayout, buffers, indexBuffer);
     }
 
-    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewRenderer: Viewer.ViewerRenderInput) {
+    private visible(viewerInput: Viewer.ViewerRenderInput) {
+        const hour = Math.floor(viewerInput.time / TIME_FACTOR) % 24;
+        const { timeOn, timeOff } = this.key;
+        if (timeOn !== undefined && timeOff !== undefined) {
+            if (timeOn < timeOff && (hour < timeOn || timeOff < hour)) return false;
+            if (timeOff < timeOn && (hour < timeOn && timeOff < hour)) return false;
+        }
+
+        if (!viewerInput.camera.frustum.contains(this.bbox))
+            return false;
+
+        if (this.key.drawDistance !== undefined) {
+            const nearPlane = viewerInput.camera.frustum.planes[2];
+            const c = vec3.create();
+            this.bbox.centerPoint(c);
+            const dist = Math.abs(nearPlane.distance(c[0], c[1], c[2]));
+            if (dist > this.bbox.boundingSphereRadius() + 3 * this.key.drawDistance)
+                return false;
+        }
+
+        return true;
+    }
+
+    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput): void {
+        if (!this.visible(viewerInput)) return;
+
         const renderInst = renderInstManager.pushRenderInst();
         renderInst.setInputLayoutAndState(this.inputLayout, this.inputState);
         renderInst.drawIndexes(this.indices);
 
-        if (this.gfxProgram === null)
-            this.gfxProgram = renderInstManager.gfxRenderCache.createProgram(device, this.program);
+        if (this.gfxProgram === undefined)
+            this.gfxProgram = renderInstManager.gfxRenderCache.createProgram(device, program);
 
         renderInst.setGfxProgram(this.gfxProgram);
         renderInst.setMegaStateFlags(this.megaStateFlags);
@@ -338,7 +386,7 @@ export class MapLayer {
 
         let offs = renderInst.allocateUniformBuffer(GTA3Program.ub_MeshFragParams, 12);
         const mapped = renderInst.mapUniformBufferF32(GTA3Program.ub_MeshFragParams);
-        offs += fillMatrix4x3(mapped, offs, viewRenderer.camera.viewMatrix);
+        offs += fillMatrix4x3(mapped, offs, viewerInput.camera.viewMatrix);
     }
 
     public destroy(device: GfxDevice): void {
@@ -346,78 +394,10 @@ export class MapLayer {
         device.destroyBuffer(this.vertexBuffer);
         device.destroyInputLayout(this.inputLayout);
         device.destroyInputState(this.inputState);
-        if (this.atlas) this.atlas.destroy(device);
-    }
-}
-
-export function layerKey(obj: ObjectDefinition, zone: string): MapLayerKey {
-    let renderLayer = GfxRendererLayer.OPAQUE;
-    if (obj.flags & ObjectFlags.NO_ZBUFFER_WRITE) {
-        renderLayer = LAYER_SHADOWS;
-    } else if (obj.flags & ObjectFlags.DRAW_LAST) {
-        renderLayer = LAYER_TREES;
-    }
-    const key: MapLayerKey = { zone, renderLayer };
-    if (obj.drawDistance < 99) {
-        key.drawDistance = obj.drawDistance;
-    }
-    if (obj.tobj) {
-        key.timeOn = obj.timeOn;
-        key.timeOff = obj.timeOff;
-    }
-    return key;
-}
-
-function layerVisible(layer: MapLayer, viewerInput: Viewer.ViewerRenderInput) {
-    const hour = Math.floor(viewerInput.time / TIME_FACTOR) % 24;
-    const { timeOn, timeOff } = layer.key;
-    if (timeOn !== undefined && timeOff !== undefined) {
-        if (timeOn < timeOff && (hour < timeOn || timeOff < hour)) return false;
-        if (timeOff < timeOn && (hour < timeOn && timeOff < hour)) return false;
-    }
-
-    if (!viewerInput.camera.frustum.contains(layer.bbox))
-        return false;
-
-    if (layer.key.drawDistance !== undefined) {
-        const nearPlane = viewerInput.camera.frustum.planes[2];
-        const c = vec3.create();
-        layer.bbox.centerPoint(c);
-        const dist = Math.abs(nearPlane.distance(c[0], c[1], c[2]));
-        if (dist > layer.bbox.boundingSphereRadius() + 3 * layer.key.drawDistance)
-            return false;
-    }
-
-    return true;
-}
-
-const bindingLayouts: GfxBindingLayoutDescriptor[] = [
-    { numUniformBuffers: 2, numSamplers: 1 },
-];
-
-export class SceneRenderer {
-    public modelCache = new ModelCache();
-    public layers: MapLayer[] = [];
-
-    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput, ambient: Color): void {
-        const template = renderInstManager.pushTemplateRenderInst();
-        template.setBindingLayouts(bindingLayouts);
-
-        let offs = template.allocateUniformBuffer(GTA3Program.ub_SceneParams, 16 + 4);
-        const sceneParamsMapped = template.mapUniformBufferF32(GTA3Program.ub_SceneParams);
-        offs += fillMatrix4x4(sceneParamsMapped, offs, viewerInput.camera.projectionMatrix);
-        offs += fillColor(sceneParamsMapped, offs, ambient);
-
-        for (const layer of this.layers)
-            if (layerVisible(layer, viewerInput))
-                layer.prepareToRender(device, renderInstManager, viewerInput);
-
-        renderInstManager.popTemplateRenderInst();
-    }
-
-    public destroy(device: GfxDevice): void {
-        for (const layer of this.layers.values())
-            layer.destroy(device);
+        if (this.gfxProgram !== undefined)
+            device.destroyProgram(this.gfxProgram);
+        if (this.atlas !== undefined)
+            this.atlas.destroy(device);
     }
 }
 
@@ -426,6 +406,7 @@ export class GTA3Renderer implements Viewer.SceneGfx {
     public clearRenderPassDescriptor = makeClearRenderPassDescriptor(true, colorNew(0.1, 0.1, 0.1, 0.0));
     private ambient = colorNew(0.1, 0.1, 0.1);
 
+    public modelCache = new ModelCache();
     public sceneRenderers: SceneRenderer[] = [];
 
     private renderHelper: GfxRenderHelper;
@@ -451,8 +432,18 @@ export class GTA3Renderer implements Viewer.SceneGfx {
 
         viewerInput.camera.setClipPlanes(1);
         this.renderHelper.pushTemplateRenderInst();
-        for (let i = 0; i < this.sceneRenderers.length; i++)
-            this.sceneRenderers[i].prepareToRender(device, this.renderHelper.renderInstManager, viewerInput, this.ambient);
+        const template = this.renderHelper.renderInstManager.pushTemplateRenderInst();
+        template.setBindingLayouts([ { numUniformBuffers: 2, numSamplers: 1 } ]);
+
+        let offs = template.allocateUniformBuffer(GTA3Program.ub_SceneParams, 16 + 4);
+        const sceneParamsMapped = template.mapUniformBufferF32(GTA3Program.ub_SceneParams);
+        offs += fillMatrix4x4(sceneParamsMapped, offs, viewerInput.camera.projectionMatrix);
+        offs += fillColor(sceneParamsMapped, offs, this.ambient);
+
+        for (const sceneRenderer of this.sceneRenderers)
+            sceneRenderer.prepareToRender(device, this.renderHelper.renderInstManager, viewerInput);
+
+        this.renderHelper.renderInstManager.popTemplateRenderInst();
         this.renderHelper.renderInstManager.popTemplateRenderInst();
         this.renderHelper.prepareToRender(device, hostAccessPass);
     }
@@ -498,7 +489,7 @@ export class GTA3Renderer implements Viewer.SceneGfx {
     public destroy(device: GfxDevice): void {
         this.renderHelper.destroy(device);
         this.renderTarget.destroy(device);
-        for (let i = 0; i < this.sceneRenderers.length; i++)
-            this.sceneRenderers[i].destroy(device);
+        for (const sceneRenderer of this.sceneRenderers)
+            sceneRenderer.destroy(device);
     }
 }
