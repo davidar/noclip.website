@@ -4,21 +4,20 @@ import * as Viewer from "../viewer";
 import * as rw from "librw";
 // @ts-ignore
 import { readFileSync } from "fs";
-import { TextureHolder, LoadedTexture, TextureMapping, TextureBase } from "../TextureHolder";
-import { GfxDevice, GfxFormat, GfxBufferUsage, GfxBuffer, GfxVertexAttributeDescriptor, GfxVertexAttributeFrequency, GfxInputLayout, GfxInputState, GfxVertexBufferDescriptor, GfxBindingLayoutDescriptor, GfxProgram, GfxHostAccessPass, GfxSampler, GfxTexFilterMode, GfxMipFilterMode, GfxWrapMode, GfxTextureDimension, GfxRenderPass, GfxMegaStateDescriptor, GfxBlendMode, GfxBlendFactor, GfxTexture } from "../gfx/platform/GfxPlatform";
-import { makeStaticDataBuffer, makeStaticDataBufferFromSlice } from "../gfx/helpers/BufferHelpers";
+import { TextureMapping, TextureBase } from "../TextureHolder";
+import { GfxDevice, GfxFormat, GfxBufferUsage, GfxBuffer, GfxVertexAttributeDescriptor, GfxVertexAttributeFrequency, GfxInputLayout, GfxInputState, GfxProgram, GfxHostAccessPass, GfxTexFilterMode, GfxMipFilterMode, GfxWrapMode, GfxTextureDimension, GfxRenderPass, GfxMegaStateDescriptor, GfxBlendMode, GfxBlendFactor, GfxBindingLayoutDescriptor } from "../gfx/platform/GfxPlatform";
+import { makeStaticDataBuffer } from "../gfx/helpers/BufferHelpers";
 import { DeviceProgram } from "../Program";
 import { convertToTriangleIndexBuffer, filterDegenerateTriangleIndexBuffer, GfxTopology } from "../gfx/helpers/TopologyHelpers";
-import { fillMatrix4x3, fillMatrix4x4, fillColor, fillVec4v, fillVec3 } from "../gfx/helpers/UniformBufferHelpers";
-import { mat4, quat, vec4, vec3, vec2 } from "gl-matrix";
-import { computeViewMatrix, Camera, computeViewSpaceDepthFromWorldSpaceAABB } from "../Camera";
-import ArrayBufferSlice from "../ArrayBufferSlice";
+import { fillMatrix4x3, fillMatrix4x4, fillColor } from "../gfx/helpers/UniformBufferHelpers";
+import { mat4, quat, vec3, vec2 } from "gl-matrix";
+import { computeViewSpaceDepthFromWorldSpaceAABB } from "../Camera";
 import { GfxRenderHelper } from "../gfx/render/GfxRenderGraph";
-import { nArray, assertExists, assert } from "../util";
+import { assert } from "../util";
 import { BasicRenderTarget, makeClearRenderPassDescriptor } from "../gfx/helpers/RenderTargetHelpers";
 import { GfxRenderInstManager, GfxRendererLayer, makeSortKey, setSortKeyDepth } from "../gfx/render/GfxRenderer";
-import { ItemInstance, ObjectDefinition, ObjectFlags } from "./item";
-import { Color, colorNew, White, colorNewCopy, colorLerp, colorMult } from "../Color";
+import { ItemInstance, ObjectDefinition } from "./item";
+import { colorNew, White, colorNewCopy, colorLerp, colorMult } from "../Color";
 import { ColorSet } from "./time";
 import { AABB } from "../Geometry";
 
@@ -45,16 +44,16 @@ export class Texture implements TextureBase {
     }
 }
 
-function halve(px: Uint8Array, width: number, height: number): Uint8Array {
+function halve(pixels: Uint8Array, width: number, height: number): Uint8Array {
     const halved = new Uint8Array(width * height);
     for (let y = 0; y < height/2; y++) {
         for (let x = 0; x < width/2; x++) {
             for (let i = 0; i < 4; i++) {
                 halved[4 * (x + y * width/2) + i] =
-                    ( px[4 * ((2*x+0) + (2*y+0) * width) + i]
-                    + px[4 * ((2*x+1) + (2*y+0) * width) + i]
-                    + px[4 * ((2*x+0) + (2*y+1) * width) + i]
-                    + px[4 * ((2*x+1) + (2*y+1) * width) + i] ) / 4;
+                    ( pixels[4 * ((2*x+0) + (2*y+0) * width) + i]
+                    + pixels[4 * ((2*x+1) + (2*y+0) * width) + i]
+                    + pixels[4 * ((2*x+0) + (2*y+1) * width) + i]
+                    + pixels[4 * ((2*x+1) + (2*y+1) * width) + i] ) / 4;
             }
         }
     }
@@ -218,7 +217,7 @@ class MeshData {
     }
 }
 
-class ModelCache {
+export class ModelCache {
     public meshData = new Map<string, MeshData>();
 
     public addModel(model: rw.Clump, obj: ObjectDefinition) {
@@ -391,19 +390,20 @@ export class SceneRenderer {
     }
 }
 
+const bindingLayouts: GfxBindingLayoutDescriptor[] = [
+    { numUniformBuffers: 2, numSamplers: 1 },
+];
+
 export class GTA3Renderer implements Viewer.SceneGfx {
-    public renderTarget = new BasicRenderTarget();
-    public clearRenderPassDescriptor = makeClearRenderPassDescriptor(true, colorNew(0.1, 0.1, 0.1, 0.0));
-    private ambient = colorNew(0.1, 0.1, 0.1);
-
-    public modelCache = new ModelCache();
     public sceneRenderers: SceneRenderer[] = [];
+    public onstatechanged!: () => void;
 
+    private renderTarget = new BasicRenderTarget();
+    private clearRenderPassDescriptor = makeClearRenderPassDescriptor(true, colorNewCopy(White));
+    private ambient = colorNewCopy(White);
     private renderHelper: GfxRenderHelper;
-
     private weather = 0;
     private scenarioSelect: UI.SingleSelect;
-    public onstatechanged!: () => void;
 
     constructor(device: GfxDevice, private colorSets: ColorSet[]) {
         this.renderHelper = new GfxRenderHelper(device);
@@ -423,7 +423,7 @@ export class GTA3Renderer implements Viewer.SceneGfx {
         viewerInput.camera.setClipPlanes(1);
         this.renderHelper.pushTemplateRenderInst();
         const template = this.renderHelper.renderInstManager.pushTemplateRenderInst();
-        template.setBindingLayouts([ { numUniformBuffers: 2, numSamplers: 1 } ]);
+        template.setBindingLayouts(bindingLayouts);
 
         let offs = template.allocateUniformBuffer(GTA3Program.ub_SceneParams, 16 + 4);
         const sceneParamsMapped = template.mapUniformBufferF32(GTA3Program.ub_SceneParams);

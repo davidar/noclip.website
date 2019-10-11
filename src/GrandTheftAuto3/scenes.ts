@@ -3,7 +3,7 @@ import * as Viewer from '../viewer';
 import * as rw from 'librw';
 import { GfxDevice } from '../gfx/platform/GfxPlatform';
 import { DataFetcher } from '../DataFetcher';
-import { GTA3Renderer, SceneRenderer, DrawKey, Texture, TextureAtlas, MeshInstance } from './render';
+import { GTA3Renderer, SceneRenderer, DrawKey, Texture, TextureAtlas, MeshInstance, ModelCache } from './render';
 import { SceneContext } from '../SceneBase';
 import { getTextDecoder, assert } from '../util';
 import { parseItemPlacement, ItemPlacement, parseItemDefinition, ItemDefinition, ObjectDefinition, ItemInstance, parseZones } from './item';
@@ -127,6 +127,7 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
         const loadedTXD = new Map<string, Promise<void>>();
         const loadedDFF = new Map<string, Promise<void>>();
         const textures  = new Map<string, Texture>();
+        const modelCache = new ModelCache();
         for (const [drawKey, items] of layers) (async () => {
             const promises: Promise<void>[] = [];
             for (const [item, obj] of items) {
@@ -157,7 +158,7 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
                         const clump = rw.Clump.streamRead(stream);
                         header.delete();
                         stream.delete();
-                        renderer.modelCache.addModel(clump, obj);
+                        modelCache.addModel(clump, obj);
                         clump.delete();
                     }));
                 }
@@ -168,7 +169,7 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
             const layerTextures = new Map<string, Texture[]>();
             const layerMeshes: MeshInstance[] = [];
             for (const [item, obj] of items) {
-                const model = renderer.modelCache.meshData.get(item.modelName);
+                const model = modelCache.meshData.get(item.modelName);
                 if (model === undefined) {
                     console.warn('Missing model', item.modelName);
                     continue;
