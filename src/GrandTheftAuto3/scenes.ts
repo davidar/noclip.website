@@ -164,7 +164,7 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
             }
             await Promise.all(promises);
 
-            const layerTextures: Texture[] = [];
+            const layerTextures = new Map<string, Texture[]>();
             const layerMeshes: MeshInstance[] = [];
             for (const [item, obj] of items) {
                 const model = renderer.modelCache.meshData.get(item.modelName);
@@ -178,14 +178,18 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
                     if (texture === undefined) {
                         console.warn('Missing texture', frag.texName, 'for', item.modelName);
                     } else {
-                        layerTextures.push(texture);
+                        const res = texture.width + 'x' + texture.height;
+                        if (!layerTextures.has(res)) layerTextures.set(res, []);
+                        layerTextures.get(res)!.push(texture);
                     }
                 }
                 layerMeshes.push(new MeshInstance(model, item));
             }
-            const atlas = (layerTextures.length > 0) ? new TextureAtlas(device, layerTextures) : undefined;
-            const sceneRenderer = new SceneRenderer(device, drawKey, layerMeshes, atlas);
-            renderer.sceneRenderers.push(sceneRenderer);
+            for (const [res, textures] of layerTextures) {
+                const atlas = (textures.length > 0) ? new TextureAtlas(device, textures) : undefined;
+                const sceneRenderer = new SceneRenderer(device, drawKey, layerMeshes, atlas);
+                renderer.sceneRenderers.push(sceneRenderer);
+            }
         })();
 
         return renderer;

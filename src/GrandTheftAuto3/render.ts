@@ -60,96 +60,69 @@ function halve(px: Uint8Array, width: number, height: number): Uint8Array {
 }
 
 export class TextureAtlas extends TextureMapping {
-    public subimages = new Map<string, vec4>(); // name => x offset, y offset, width, height
+    public subimages = new Map<string, number>();
 
     constructor(device: GfxDevice, textures: Texture[]) {
         super();
-        let area = 0;
-        for (const texture of textures) {
-            area += texture.width * texture.height;
-        }
         assert(textures.length > 0);
-
-        // Greedily place textures in order of decreasing height into row bins.
-        textures.sort(function(a,b) {
-            if (a.height === b.height) {
-                if (a.width === b.width) {
-                    return a.name < b.name ? 1 : -1;
-                }
-                return a.width < b.width ? 1 : -1;
-            }
-            return a.height < b.height ? 1 : -1;
-        });
-        const atlasWidth = Math.min(2048, 1 << Math.ceil(Math.log(Math.sqrt(area)) / Math.log(2)));
-        let atlasHeight = textures[0].height;
-        let ax = 0;
-        let ay = 0;
-        for (const texture of textures) {
-            if (texture.width > atlasWidth - ax) {
-                ax = 0;
-                ay = atlasHeight;
-                atlasHeight += texture.height;
-            }
-            this.subimages.set(texture.name, vec4.fromValues(ax, ay, texture.width, texture.height));
-            ax += texture.width;
+        const width = textures[0].width;
+        const height = textures[0].height;
+        for (let i = 0; i < textures.length; i++) {
+            const texture = textures[i];
+            assert(texture.width === width && texture.height === height);
+            this.subimages.set(texture.name, i);
         }
 
-        console.log('Creating', atlasWidth, 'x', atlasHeight, 'atlas from', textures.length, 'textures');
-
-        // Finalize texture atlas after placing all textures.
-        const pixels = new Uint8Array(atlasWidth * atlasHeight * 4);
+        const pixels = new Uint8Array(4 * width * height * textures.length);
+        let offs = 0;
         for (const texture of textures) {
-            const [atlasX, atlasY] = this.subimages.get(texture.name)!;
+            let srcOffs = 0;
             for (let y = 0; y < texture.height; y++) {
                 for (let x = 0; x < texture.width; x++) {
-                    const srcOffs = (y * texture.width + x) * (texture.depth / 8);
-                    const atlasOffs = ((y + atlasY) * atlasWidth + x + atlasX) * 4;
-                    pixels[atlasOffs] = texture.pixels[srcOffs];
-                    pixels[atlasOffs + 1] = texture.pixels[srcOffs + 1];
-                    pixels[atlasOffs + 2] = texture.pixels[srcOffs + 2];
+                    pixels[offs++] = texture.pixels[srcOffs++];
+                    pixels[offs++] = texture.pixels[srcOffs++];
+                    pixels[offs++] = texture.pixels[srcOffs++];
                     if (texture.depth === 32) {
-                        pixels[atlasOffs + 3] = texture.pixels[srcOffs + 3];
+                        pixels[offs++] = texture.pixels[srcOffs++];
                     } else {
-                        pixels[atlasOffs + 3] = 0xff;
+                        pixels[offs++] = 0xFF;
                     }
                 }
             }
         }
 
-        // Generate mipmaps.
-        const levelDatas = [pixels];
+        const mipmaps = [pixels];
         let mip = pixels;
-        let w = atlasWidth;
-        let h = atlasHeight;
-        for (let i = 1; i < 7; i++) {
-            mip = halve(mip, w, h);
-            levelDatas.push(mip);
+        let w = width;
+        let h = height;
+        while (w > 1) {
+            mip = halve(mip, w, h * textures.length);
+            mipmaps.push(mip);
             w = Math.max((w / 2) | 0, 1);
             h = Math.max((h / 2) | 0, 1);
         }
 
         const gfxTexture = device.createTexture({
-            dimension: GfxTextureDimension.n2D, pixelFormat: GfxFormat.U8_RGBA,
-            width: atlasWidth, height: atlasHeight, depth: 1, numLevels: levelDatas.length
+            dimension: GfxTextureDimension.n2D_ARRAY, pixelFormat: GfxFormat.U8_RGBA,
+            width, height, depth: textures.length, numLevels: mipmaps.length
         });
-        device.setResourceName(gfxTexture, `textureAtlas`);
         const hostAccessPass = device.createHostAccessPass();
-        hostAccessPass.uploadTextureData(gfxTexture, 0, levelDatas);
+        hostAccessPass.uploadTextureData(gfxTexture, 0, mipmaps);
         device.submitPass(hostAccessPass);
 
         this.gfxTexture = gfxTexture;
-        this.width = atlasWidth;
-        this.height = atlasHeight;
+        this.width = width;
+        this.height = height;
         this.flipY = false;
 
         this.gfxSampler = device.createSampler({
-            magFilter: GfxTexFilterMode.POINT,
-            minFilter: GfxTexFilterMode.POINT,
-            mipFilter: GfxMipFilterMode.NEAREST,
+            magFilter: GfxTexFilterMode.BILINEAR,
+            minFilter: GfxTexFilterMode.BILINEAR,
+            mipFilter: GfxMipFilterMode.LINEAR,
             minLOD: 0,
             maxLOD: 1000,
-            wrapS: GfxWrapMode.CLAMP,
-            wrapT: GfxWrapMode.CLAMP,
+            wrapS: GfxWrapMode.REPEAT,
+            wrapT: GfxWrapMode.REPEAT,
         });
     }
 
@@ -163,7 +136,6 @@ class GTA3Program extends DeviceProgram {
     public static a_Position = 0;
     public static a_Color = 1;
     public static a_TexCoord = 2;
-    public static a_TexLocation = 3;
 
     public static ub_SceneParams = 0;
     public static ub_MeshFragParams = 1;
@@ -318,23 +290,28 @@ export class SceneRenderer {
     constructor(device: GfxDevice, public key: DrawKey, meshes: MeshInstance[], private atlas?: TextureAtlas) {
         if (key.renderLayer === DrawKey.LAYER_SHADOWS) this.megaStateFlags.depthWrite = false;
 
+        const skipFrag = (frag: MeshFragData) =>
+            atlas !== undefined && frag.texName !== undefined && !atlas.subimages.has(frag.texName);
+
         for (const inst of meshes) {
             for (const frag of inst.meshData.meshFragData) {
+                if (skipFrag(frag)) continue;
                 this.vertices += frag.vertices();
                 this.indices += frag.indices.length;
             }
         }
 
         const points = [] as vec3[];
-        const vbuf = new Float32Array(this.vertices * 13);
+        const vbuf = new Float32Array(this.vertices * 10);
         const ibuf = new Uint32Array(this.indices);
         let voffs = 0;
         let ioffs = 0;
         let lastIndex = 0;
         for (const inst of meshes) {
             for (const frag of inst.meshData.meshFragData) {
+                if (skipFrag(frag)) continue;
                 const n = frag.vertices();
-                const texLocation = (frag.texName === undefined || atlas === undefined) ? undefined : atlas.subimages.get(frag.texName);
+                const texLayer = (frag.texName === undefined || atlas === undefined) ? undefined : atlas.subimages.get(frag.texName);
                 for (let i = 0; i < n; i++) {
                     const pos = vec3.transformMat4(vec3.create(), frag.position(i), inst.modelMatrix);
                     points.push(pos);
@@ -345,10 +322,10 @@ export class SceneRenderer {
                     const texCoord = frag.texCoord(i);
                     vbuf[voffs++] = texCoord[0];
                     vbuf[voffs++] = texCoord[1];
-                    if (texLocation === undefined) {
-                        voffs += fillVec4v(vbuf, voffs, vec4.fromValues(-1,-1,-1,-1));
+                    if (texLayer === undefined) {
+                        vbuf[voffs++] = -1;
                     } else {
-                        voffs += fillVec4v(vbuf, voffs, texLocation);
+                        vbuf[voffs++] = texLayer;
                     }
                 }
                 for (const index of frag.indices) {
@@ -365,11 +342,10 @@ export class SceneRenderer {
         const vertexAttributeDescriptors: GfxVertexAttributeDescriptor[] = [
             { location: GTA3Program.a_Position,    bufferIndex: 0, format: GfxFormat.F32_RGB,  bufferByteOffset: 0 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
             { location: GTA3Program.a_Color,       bufferIndex: 0, format: GfxFormat.F32_RGBA, bufferByteOffset: 3 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
-            { location: GTA3Program.a_TexCoord,    bufferIndex: 0, format: GfxFormat.F32_RG,   bufferByteOffset: 7 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
-            { location: GTA3Program.a_TexLocation, bufferIndex: 0, format: GfxFormat.F32_RGBA, bufferByteOffset: 9 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
+            { location: GTA3Program.a_TexCoord,    bufferIndex: 0, format: GfxFormat.F32_RGB,  bufferByteOffset: 7 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
         ];
         this.inputLayout = device.createInputLayout({ indexBufferFormat: GfxFormat.U32_R, vertexAttributeDescriptors });
-        const buffers = [{ buffer: this.vertexBuffer, byteOffset: 0, byteStride: 13 * 0x04}];
+        const buffers = [{ buffer: this.vertexBuffer, byteOffset: 0, byteStride: 10 * 0x04}];
         const indexBuffer = { buffer: this.indexBuffer, byteOffset: 0, byteStride: 0 };
         this.inputState = device.createInputState(this.inputLayout, buffers, indexBuffer);
     }
