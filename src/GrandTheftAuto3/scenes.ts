@@ -10,6 +10,7 @@ import { parseItemPlacement, ItemPlacement, parseItemDefinition, ItemDefinition,
 import { parseTimeCycle, ColorSet } from './time';
 import { quat, vec3 } from 'gl-matrix';
 import { AABB } from '../Geometry';
+import { GfxRendererLayer } from '../gfx/render/GfxRenderer';
 
 const pathBase = `GrandTheftAuto3`;
 
@@ -178,7 +179,9 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
                     if (texture === undefined) {
                         console.warn('Missing texture', frag.texName, 'for', item.modelName);
                     } else {
-                        const res = texture.width + 'x' + texture.height;
+                        let res = texture.width + 'x' + texture.height;
+                        if (rw.Raster.formatHasAlpha(texture.format))
+                            res += 'alpha';
                         if (!layerTextures.has(res)) layerTextures.set(res, []);
                         layerTextures.get(res)!.push(texture);
                     }
@@ -186,8 +189,11 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
                 layerMeshes.push(new MeshInstance(model, item));
             }
             for (const [res, textures] of layerTextures) {
+                const key = Object.assign({}, drawKey);
+                if (res.endsWith('alpha'))
+                    key.renderLayer = GfxRendererLayer.TRANSLUCENT;
                 const atlas = (textures.length > 0) ? new TextureAtlas(device, textures) : undefined;
-                const sceneRenderer = new SceneRenderer(device, drawKey, layerMeshes, atlas);
+                const sceneRenderer = new SceneRenderer(device, key, layerMeshes, atlas);
                 renderer.sceneRenderers.push(sceneRenderer);
             }
         })();

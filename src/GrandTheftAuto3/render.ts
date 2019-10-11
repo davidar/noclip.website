@@ -11,12 +11,12 @@ import { DeviceProgram } from "../Program";
 import { convertToTriangleIndexBuffer, filterDegenerateTriangleIndexBuffer, GfxTopology } from "../gfx/helpers/TopologyHelpers";
 import { fillMatrix4x3, fillMatrix4x4, fillColor, fillVec4v, fillVec3 } from "../gfx/helpers/UniformBufferHelpers";
 import { mat4, quat, vec4, vec3, vec2 } from "gl-matrix";
-import { computeViewMatrix, Camera } from "../Camera";
+import { computeViewMatrix, Camera, computeViewSpaceDepthFromWorldSpaceAABB } from "../Camera";
 import ArrayBufferSlice from "../ArrayBufferSlice";
 import { GfxRenderHelper } from "../gfx/render/GfxRenderGraph";
 import { nArray, assertExists, assert } from "../util";
 import { BasicRenderTarget, makeClearRenderPassDescriptor } from "../gfx/helpers/RenderTargetHelpers";
-import { GfxRenderInstManager, GfxRendererLayer, makeSortKey } from "../gfx/render/GfxRenderer";
+import { GfxRenderInstManager, GfxRendererLayer, makeSortKey, setSortKeyDepth } from "../gfx/render/GfxRenderer";
 import { ItemInstance, ObjectDefinition, ObjectFlags } from "./item";
 import { Color, colorNew, White, colorNewCopy, colorLerp, colorMult } from "../Color";
 import { ColorSet } from "./time";
@@ -26,6 +26,7 @@ const TIME_FACTOR = 2500; // one day cycle per minute
 
 export class Texture implements TextureBase {
     public name: string;
+    public format: number;
     public width: number;
     public height: number;
     public depth: number;
@@ -33,6 +34,7 @@ export class Texture implements TextureBase {
 
     constructor(texture: rw.Texture, txdName: string) {
         this.name = txdName + '/' + texture.name.toLowerCase();
+        this.format = texture.raster.format;
         const image = texture.raster.toImage();
         image.unindex();
         this.width = image.width;
@@ -245,20 +247,12 @@ export class MeshInstance {
 }
 
 export class DrawKey {
-    public static readonly LAYER_SHADOWS = GfxRendererLayer.TRANSLUCENT + 1;
-    public static readonly LAYER_TREES   = GfxRendererLayer.TRANSLUCENT + 2;
-
     public renderLayer: GfxRendererLayer = GfxRendererLayer.OPAQUE;
     public drawDistance?: number;
     public timeOn?: number;
     public timeOff?: number;
 
     constructor(obj: ObjectDefinition, public zone: string) {
-        if (obj.flags & ObjectFlags.NO_ZBUFFER_WRITE) {
-            this.renderLayer = DrawKey.LAYER_SHADOWS;
-        } else if (obj.flags & ObjectFlags.DRAW_LAST) {
-            this.renderLayer = DrawKey.LAYER_TREES;
-        }
         if (obj.drawDistance < 99) {
             this.drawDistance = 99;
         }
@@ -288,8 +282,6 @@ export class SceneRenderer {
     private indices = 0;
 
     constructor(device: GfxDevice, public key: DrawKey, meshes: MeshInstance[], private atlas?: TextureAtlas) {
-        if (key.renderLayer === DrawKey.LAYER_SHADOWS) this.megaStateFlags.depthWrite = false;
-
         const skipFrag = (frag: MeshFragData) =>
             atlas !== undefined && frag.texName !== undefined && !atlas.subimages.has(frag.texName);
 
@@ -350,31 +342,22 @@ export class SceneRenderer {
         this.inputState = device.createInputState(this.inputLayout, buffers, indexBuffer);
     }
 
-    private visible(viewerInput: Viewer.ViewerRenderInput) {
+    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput, dual: boolean): void {
         const hour = Math.floor(viewerInput.time / TIME_FACTOR) % 24;
         const { timeOn, timeOff } = this.key;
+        let renderLayer = this.key.renderLayer;
         if (timeOn !== undefined && timeOff !== undefined) {
-            if (timeOn < timeOff && (hour < timeOn || timeOff < hour)) return false;
-            if (timeOff < timeOn && (hour < timeOn && timeOff < hour)) return false;
+            if (timeOn < timeOff && (hour < timeOn || timeOff < hour)) return;
+            if (timeOff < timeOn && (hour < timeOn && timeOff < hour)) return;
+            renderLayer += 1;
         }
 
         if (!viewerInput.camera.frustum.contains(this.bbox))
-            return false;
+            return;
 
-        if (this.key.drawDistance !== undefined) {
-            const nearPlane = viewerInput.camera.frustum.planes[2];
-            const c = vec3.create();
-            this.bbox.centerPoint(c);
-            const dist = Math.abs(nearPlane.distance(c[0], c[1], c[2]));
-            if (dist > this.bbox.boundingSphereRadius() + 3 * this.key.drawDistance)
-                return false;
-        }
-
-        return true;
-    }
-
-    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput, dual: boolean): void {
-        if (!this.visible(viewerInput)) return;
+        const depth = computeViewSpaceDepthFromWorldSpaceAABB(viewerInput.camera, this.bbox);
+        if (this.key.drawDistance !== undefined && depth > this.bbox.boundingSphereRadius() + 3 * this.key.drawDistance)
+            return;
 
         const renderInst = renderInstManager.pushRenderInst();
         renderInst.setInputLayoutAndState(this.inputLayout, this.inputState);
@@ -388,12 +371,12 @@ export class SceneRenderer {
         if (dual) renderInst.setMegaStateFlags({ depthWrite: false });
         if (this.atlas !== undefined)
             renderInst.setSamplerBindingsFromTextureMappings([this.atlas]);
-        renderInst.sortKey = makeSortKey(this.key.renderLayer);
+        renderInst.sortKey = setSortKeyDepth(makeSortKey(renderLayer), depth);
 
         let offs = renderInst.allocateUniformBuffer(GTA3Program.ub_MeshFragParams, 12 + 4);
         const mapped = renderInst.mapUniformBufferF32(GTA3Program.ub_MeshFragParams);
         offs += fillMatrix4x3(mapped, offs, viewerInput.camera.viewMatrix);
-        mapped[offs++] = (this.key.renderLayer !== DrawKey.LAYER_TREES) ? 0.01 : dual ? -0.9 : 0.9;
+        mapped[offs++] = !(renderLayer & GfxRendererLayer.TRANSLUCENT) ? 0.01 : dual ? -0.9 : 0.9;
     }
 
     public destroy(device: GfxDevice): void {
@@ -449,7 +432,7 @@ export class GTA3Renderer implements Viewer.SceneGfx {
 
         for (const sceneRenderer of this.sceneRenderers) {
             sceneRenderer.prepareToRender(device, this.renderHelper.renderInstManager, viewerInput, false);
-            if (sceneRenderer.key.renderLayer === DrawKey.LAYER_TREES) {
+            if (sceneRenderer.key.renderLayer & GfxRendererLayer.TRANSLUCENT) {
                 // PS2 alpha test emulation, see http://skygfx.rockstarvision.com/skygfx.html
                 sceneRenderer.prepareToRender(device, this.renderHelper.renderInstManager, viewerInput, true);
             }
