@@ -14,23 +14,35 @@ import { AABB } from '../Geometry';
 import { GfxRendererLayer } from '../gfx/render/GfxRenderer';
 import ArrayBufferSlice from '../ArrayBufferSlice';
 
-const pathBase = `GrandTheftAuto3`;
-
 function UTF8ToString(array: Uint8Array) {
     let length = 0; while (length < array.length && array[length]) length++;
     return getTextDecoder('utf8')!.decode(array.subarray(0, length));
 }
 
-class GTA3SceneDesc implements Viewer.SceneDesc {
+export class GTA3SceneDesc implements Viewer.SceneDesc {
     private static initialised = false;
-    private complete: boolean;
+
+    protected pathBase: string;
+    protected complete: boolean;
+    protected showWater: boolean;
+    protected paths = {
+        zon: 'data/gta3.zon',
+        dat: {
+            timecyc: 'data/timecyc.dat',
+            waterpro: 'data/waterpro.dat',
+        },
+        ide: [] as string[],
+        ipl: [] as string[],
+    };
+
     private assets = new Map<string, ArrayBufferSlice>();
-    private ids: string[];
 
     constructor(public id: string, public name: string) {
+        this.pathBase = 'GrandTheftAuto3';
         this.complete = (this.id === 'all');
+        this.showWater = true;
         if (this.complete) {
-            this.ids = [
+            this.paths.ipl = [
                 "comntop/comNtop",
                 "comnbtm/comNbtm",
                 "comse/comSE",
@@ -45,8 +57,11 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
                 "props"
             ];
         } else {
-            this.ids = this.id.split(';');
+            this.paths.ipl = [this.id];
         }
+        this.paths.ide = ['generic', 'temppart/temppart', 'comroad/comroad', 'indroads/indroads', 'making/making', 'subroads/subroads'];
+        for (const id of this.paths.ipl)
+            if (id.match(/\//)) this.paths.ide.push(id.toLowerCase());
     }
 
     private static async initialise() {
@@ -61,8 +76,8 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
 
     private async fetchIMG(dataFetcher: DataFetcher): Promise<void> {
         const [bufferDIR, bufferIMG] = await Promise.all([
-            dataFetcher.fetchData(`${pathBase}/models/gta3.dir`),
-            dataFetcher.fetchData(`${pathBase}/models/gta3.img`),
+            dataFetcher.fetchData(`${this.pathBase}/models/gta3.dir`),
+            dataFetcher.fetchData(`${this.pathBase}/models/gta3.img`),
         ]);
         const view = bufferDIR.createDataView();
         for (let i = 0; i < view.byteLength; i += 32) {
@@ -70,21 +85,21 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
             const size = view.getUint32(i + 4, true);
             const name = UTF8ToString(bufferDIR.subarray(i + 8, 24).createTypedArray(Uint8Array)).toLowerCase();
             const data = bufferIMG.subarray(2048 * offset, 2048 * size);
-            this.assets.set(`${pathBase}/models/gta3/${name}`, data);
+            this.assets.set(`${this.pathBase}/models/gta3/${name}`, data);
         }
     }
 
     private async fetch(dataFetcher: DataFetcher, path: string): Promise<ArrayBufferSlice> {
-        let buffer = this.assets.get(path);
+        let buffer = this.assets.get(`${this.pathBase}/${path}`);
         if (buffer === undefined) {
-            buffer = await dataFetcher.fetchData(path);
+            buffer = await dataFetcher.fetchData(`${this.pathBase}/${path}`);
             this.assets.set(path, buffer);
         }
         return buffer;
     }
 
     private async fetchIDE(dataFetcher: DataFetcher, id: string): Promise<ItemDefinition> {
-        const buffer = await this.fetch(dataFetcher, `${pathBase}/data/maps/${id}.ide`);
+        const buffer = await this.fetch(dataFetcher, `data/maps/${id}.ide`);
         const text = getTextDecoder('utf8')!.decode(buffer.createDataView());
         return parseItemDefinition(text);
     }
@@ -99,32 +114,32 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
                 scale: vec3.fromValues(10,10,10),
             }]
         };
-        const buffer = await this.fetch(dataFetcher, (id === 'props') ? `${pathBase}/data/maps/props.IPL` : `${pathBase}/data/maps/${id}.ipl`);
+        const buffer = await this.fetch(dataFetcher, (id === 'props') ? `data/maps/props.IPL` : `data/maps/${id}.ipl`);
         const text = getTextDecoder('utf8')!.decode(buffer.createDataView());
         return parseItemPlacement(text);
     }
 
     private async fetchTimeCycle(dataFetcher: DataFetcher): Promise<ColorSet[]> {
-        const buffer = await this.fetch(dataFetcher, `${pathBase}/data/timecyc.dat`);
+        const buffer = await this.fetch(dataFetcher, this.paths.dat.timecyc);
         const text = getTextDecoder('utf8')!.decode(buffer.createDataView());
         return parseTimeCycle(text);
     }
 
     private async fetchZones(dataFetcher: DataFetcher): Promise<Map<string, AABB>> {
-        const buffer = await this.fetch(dataFetcher, `${pathBase}/data/gta3.zon`);
+        const buffer = await this.fetch(dataFetcher, this.paths.zon);
         const text = getTextDecoder('utf8')!.decode(buffer.createDataView());
         return parseZones(text);
     }
 
     private async fetchWater(dataFetcher: DataFetcher): Promise<ItemPlacement> {
-        const buffer = await this.fetch(dataFetcher, `${pathBase}/data/waterpro.dat`);
+        const buffer = await this.fetch(dataFetcher, this.paths.dat.waterpro);
         return parseWaterPro(buffer.createDataView());
     }
 
     private async fetchTXD(dataFetcher: DataFetcher, txdName: string, textures: Map<string, Texture>): Promise<void> {
         const txdPath = (txdName === 'generic' || txdName === 'particle')
-                      ? `${pathBase}/models/${txdName}.txd`
-                      : `${pathBase}/models/gta3/${txdName}.txd`;
+                      ? `models/${txdName}.txd`
+                      : `models/gta3/${txdName}.txd`;
         const buffer = await this.fetch(dataFetcher, txdPath);
         const stream = new rw.StreamMemory(buffer.createTypedArray(Uint8Array));
         const header = new rw.ChunkHeaderInfo(stream);
@@ -140,7 +155,7 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
     }
 
     private async fetchDFF(dataFetcher: DataFetcher, modelName: string, cb: (clump: rw.Clump) => void): Promise<void> {
-        const dffPath = `${pathBase}/models/gta3/${modelName}.dff`;
+        const dffPath = `models/gta3/${modelName}.dff`;
         const buffer = await this.fetch(dataFetcher, dffPath);
         const stream = new rw.StreamMemory(buffer.createTypedArray(Uint8Array));
         const header = new rw.ChunkHeaderInfo(stream);
@@ -152,21 +167,26 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
         clump.delete();
     }
 
+    protected filter(item: ItemInstance, obj: ObjectDefinition, zone: string) {
+        return true;
+    }
+
     public async createScene(device: GfxDevice, context: SceneContext): Promise<Viewer.SceneGfx> {
         await GTA3SceneDesc.initialise();
         const dataFetcher = context.dataFetcher;
         const objects = new Map<String, ObjectDefinition>();
 
-        const ideids = ['generic', 'temppart/temppart', 'comroad/comroad', 'indroads/indroads', 'making/making', 'subroads/subroads'];
-        for (const id of this.ids)
-            if (id.match(/\//)) ideids.push(id.toLowerCase());
-        const ides = await Promise.all(ideids.map(id => this.fetchIDE(dataFetcher, id)));
+        if (this.complete)
+            await this.fetchIMG(dataFetcher);
+
+        const ides = await Promise.all(this.paths.ide.map(id => this.fetchIDE(dataFetcher, id)));
         for (const ide of ides) for (const obj of ide.objects) objects.set(obj.modelName, obj);
         objects.set('water', waterDefinition);
 
-        const ipls = await Promise.all(this.ids.map(id => this.fetchIPL(dataFetcher, id)));
-        const [colorSets, zones, water] = await Promise.all([this.fetchTimeCycle(dataFetcher), this.fetchZones(dataFetcher), this.fetchWater(dataFetcher)]);
-        ipls.push(water);
+        const ipls = await Promise.all(this.paths.ipl.map(id => this.fetchIPL(dataFetcher, id)));
+        const [colorSets, zones] = await Promise.all([this.fetchTimeCycle(dataFetcher), this.fetchZones(dataFetcher)]);
+        if (this.showWater)
+            ipls.push(await this.fetchWater(dataFetcher));
 
         const drawKeys = new Map<string, DrawKey>();
         const layers = new Map<DrawKey, [ItemInstance, ObjectDefinition][]>();
@@ -192,11 +212,9 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
                 drawKeys.set(drawKeyStr, drawKeyObj);
             const drawKey = drawKeys.get(drawKeyStr)!;
             if (!layers.has(drawKey)) layers.set(drawKey, []);
-            layers.get(drawKey)!.push([item, obj]);
+            if (this.filter(item, obj, zone))
+                layers.get(drawKey)!.push([item, obj]);
         }
-
-        if (this.complete)
-            await this.fetchIMG(dataFetcher);
 
         const renderer = new GTA3Renderer(device, colorSets);
         const loadedTXD = new Map<string, Promise<void>>();
@@ -204,13 +222,15 @@ class GTA3SceneDesc implements Viewer.SceneDesc {
         const textures  = new Map<string, Texture>();
         const modelCache = new ModelCache();
 
-        loadedTXD.set('particle', this.fetchTXD(dataFetcher, 'particle', textures));
-        loadedDFF.set('water', (async () => {})());
-        modelCache.meshData.set('water', [waterMeshFragData]);
+        if (this.showWater) {
+            loadedTXD.set('particle', this.fetchTXD(dataFetcher, 'particle', textures));
+            loadedDFF.set('water', (async () => { })());
+            modelCache.meshData.set('water', [waterMeshFragData]);
 
-        loadedTXD.get('particle')!.then(() =>
-            renderer.sceneRenderers.push(new SkyRenderer(device,
-                new TextureArray(device, [textures.get('particle/water_old')!]))));
+            loadedTXD.get('particle')!.then(() =>
+                renderer.sceneRenderers.push(new SkyRenderer(device,
+                    new TextureArray(device, [textures.get('particle/water_old')!]))));
+        }
 
         for (const [drawKey, items] of layers) {
             const promises: Promise<void>[] = [];

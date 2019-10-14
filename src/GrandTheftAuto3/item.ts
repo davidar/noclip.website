@@ -77,15 +77,30 @@ export interface ItemInstance {
     translation: vec3;
     scale: vec3;
     rotation: quat;
+    interior?: number;
+    lod?: number;
 }
 
-function parseItemInstance([id, model, posX, posY, posZ, scaleX, scaleY, scaleZ, rotX, rotY, rotZ, rotW]: string[]): ItemInstance {
+function parseItemInstance(line: string[]): ItemInstance {
+    let [id, model, interior, posX, posY, posZ, scaleX, scaleY, scaleZ, rotX, rotY, rotZ, rotW, lod] = [] as (string | undefined)[];
+    if (line.length === 12) { // III
+        [id, model, posX, posY, posZ, scaleX, scaleY, scaleZ, rotX, rotY, rotZ, rotW] = line;
+    } else if (line.length === 13) { // VC
+        [id, model, interior, posX, posY, posZ, scaleX, scaleY, scaleZ, rotX, rotY, rotZ, rotW] = line;
+    } else if (line.length === 11) { // SA
+        [id, model, interior, posX, posY, posZ, rotX, rotY, rotZ, rotW, lod] = line;
+        scaleX = scaleY = scaleZ = '1';
+    } else {
+        throw new Error('error parsing INST');
+    }
     return {
         id: Number(id),
         modelName: model,
         translation: vec3.fromValues(Number(posX), Number(posY), Number(posZ)),
         scale: vec3.fromValues(Number(scaleX), Number(scaleY), Number(scaleZ)),
-        rotation: quat.fromValues(Number(rotX), Number(rotY), Number(rotZ), -Number(rotW))
+        rotation: quat.fromValues(Number(rotX), Number(rotY), Number(rotZ), -Number(rotW)),
+        interior: (interior === undefined) ? undefined : Number(interior),
+        lod: (lod === undefined) ? undefined : Number(lod),
     };
 }
 
