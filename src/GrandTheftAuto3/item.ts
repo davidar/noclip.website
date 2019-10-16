@@ -37,7 +37,6 @@ export interface ObjectDefinition {
     tobj: boolean;
     timeOn?: number;
     timeOff?: number;
-    dynamic: boolean;
 }
 
 function parseObjectDefinition(row: string[], tobj: boolean): ObjectDefinition {
@@ -48,7 +47,6 @@ function parseObjectDefinition(row: string[], tobj: boolean): ObjectDefinition {
         drawDistance: Number((row.length > 5) ? row[4] : row[3]),
         flags: Number(tobj ? row[row.length - 3] : row[row.length - 1]),
         tobj,
-        dynamic: false
     };
     if (tobj) {
         def.timeOn  = Number(row[row.length - 2]);
@@ -80,6 +78,8 @@ export interface ItemInstance {
     interior?: number;
     lod?: number;
 }
+
+export const INTERIOR_EVERYWHERE = 13;
 
 function parseItemInstance(line: string[]): ItemInstance {
     let [id, model, interior, posX, posY, posZ, scaleX, scaleY, scaleZ, rotX, rotY, rotZ, rotW, lod] = [] as (string | undefined)[];

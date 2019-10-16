@@ -24,7 +24,11 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
 
     protected pathBase: string;
     protected complete: boolean;
-    protected showWater: boolean;
+    protected water = {
+        origin: vec3.create(),
+        texture: 'water_old',
+    };
+    protected weatherTypes = ['Sunny', 'Cloudy', 'Rainy', 'Foggy'];
     protected paths = {
         zon: 'data/gta3.zon',
         dat: {
@@ -40,7 +44,6 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
     constructor(public id: string, public name: string) {
         this.pathBase = 'GrandTheftAuto3';
         this.complete = (this.id === 'all');
-        this.showWater = true;
         if (this.complete) {
             this.paths.ipl = [
                 "comntop/comNtop",
@@ -133,7 +136,7 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
 
     private async fetchWater(dataFetcher: DataFetcher): Promise<ItemPlacement> {
         const buffer = await this.fetch(dataFetcher, this.paths.dat.waterpro);
-        return parseWaterPro(buffer.createDataView());
+        return parseWaterPro(buffer.createDataView(), this.water.origin);
     }
 
     private async fetchTXD(dataFetcher: DataFetcher, txdName: string, textures: Map<string, Texture>): Promise<void> {
@@ -184,9 +187,8 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
         objects.set('water', waterDefinition);
 
         const ipls = await Promise.all(this.paths.ipl.map(id => this.fetchIPL(dataFetcher, id)));
-        const [colorSets, zones] = await Promise.all([this.fetchTimeCycle(dataFetcher), this.fetchZones(dataFetcher)]);
-        if (this.showWater)
-            ipls.push(await this.fetchWater(dataFetcher));
+        const [colorSets, zones, water] = await Promise.all([this.fetchTimeCycle(dataFetcher), this.fetchZones(dataFetcher), await this.fetchWater(dataFetcher)]);
+        ipls.push(water);
 
         const drawKeys = new Map<string, DrawKey>();
         const layers = new Map<DrawKey, [ItemInstance, ObjectDefinition][]>();
@@ -216,21 +218,21 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
                 layers.get(drawKey)!.push([item, obj]);
         }
 
-        const renderer = new GTA3Renderer(device, colorSets);
+        const renderer = new GTA3Renderer(device, colorSets, this.weatherTypes);
         const loadedTXD = new Map<string, Promise<void>>();
         const loadedDFF = new Map<string, Promise<void>>();
         const textures  = new Map<string, Texture>();
         const modelCache = new ModelCache();
 
-        if (this.showWater) {
-            loadedTXD.set('particle', this.fetchTXD(dataFetcher, 'particle', textures));
-            loadedDFF.set('water', (async () => { })());
-            modelCache.meshData.set('water', [waterMeshFragData]);
+        loadedTXD.set('particle', this.fetchTXD(dataFetcher, 'particle', textures));
+        loadedDFF.set('water', (async () => { })());
+        modelCache.meshData.set('water', [waterMeshFragData(this.water.texture)]);
 
-            loadedTXD.get('particle')!.then(() =>
-                renderer.sceneRenderers.push(new SkyRenderer(device,
-                    new TextureArray(device, [textures.get('particle/water_old')!]))));
-        }
+        loadedTXD.get('particle')!.then(() => {
+            const waterTex = textures.get(`particle/${this.water.texture}`)!;
+            console.log(waterTex);
+            renderer.sceneRenderers.push(new SkyRenderer(device, this.water.origin, new TextureArray(device, [waterTex])));
+        });
 
         for (const [drawKey, items] of layers) {
             const promises: Promise<void>[] = [];
@@ -267,11 +269,12 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
                 }
                 for (const [res, textures] of layerTextures) {
                     const key = Object.assign({}, drawKey);
-                    if (res.endsWith('alpha'))
+                    if (res.endsWith('alpha') || key.water)
                         key.renderLayer = GfxRendererLayer.TRANSLUCENT;
                     const atlas = (textures.size > 0) ? new TextureArray(device, Array.from(textures)) : undefined;
-                    const sceneRenderer = new SceneRenderer(device, key, layerMeshes, atlas);
-                    renderer.sceneRenderers.push(sceneRenderer);
+                    renderer.sceneRenderers.push(new SceneRenderer(device, key, layerMeshes, false, atlas));
+                    if (key.renderLayer === GfxRendererLayer.TRANSLUCENT)
+                        renderer.sceneRenderers.push(new SceneRenderer(device, key, layerMeshes, true, atlas));
                 }
             });
             if (this.complete)

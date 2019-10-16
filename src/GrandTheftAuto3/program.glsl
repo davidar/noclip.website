@@ -7,14 +7,13 @@ layout(row_major, std140) uniform ub_SceneParams {
 
 layout(row_major, std140) uniform ub_MeshFragParams {
     Mat4x3 u_ViewMatrix;
-    vec4 u_AmbientColor;
+    vec4 u_Color;
 #ifdef SKY
     Mat4x3 u_WorldMatrix;
     vec4 u_Frustum;
     vec4 u_SkyTopColor;
     vec4 u_SkyBotColor;
-#else
-    float alphaThreshold;
+    vec3 u_Origin;
 #endif
 };
 
@@ -52,27 +51,33 @@ void main() {
     vec3 nearPlane = v_Position * u_Frustum.xyz;
     vec3 cameraRay = Mul(u_WorldMatrix, vec4(nearPlane, 0.0));
     vec3 cameraPos = Mul(u_WorldMatrix, vec4(vec3(0.0), 1.0));
-    float t = -cameraPos.y / cameraRay.y;
-    vec3 oceanPlane = cameraPos + t * cameraRay;
+    float elevation = atan(cameraRay.y, length(cameraRay.zx)) * 180.0 / radians(180.0);
+    gl_FragColor = mix(u_SkyBotColor, u_SkyTopColor, clamp(abs(elevation / 45.0), 0.0, 1.0));
+    gl_FragDepth = 0.0;
 
-    if (t > 0.0 && (abs(oceanPlane.z) > 2000.0 || abs(oceanPlane.x) > 2000.0)) {
-        vec2 uv = fract(oceanPlane.zx / 32.0);
-        vec4 t_Color = vec4(0,0,0,1);
-        t_Color.rgb += u_AmbientColor.rgb;
+    float t = (u_Origin.y - cameraPos.y) / cameraRay.y;
+    vec3 oceanPlane = cameraPos + t * cameraRay;
+    if (t > 0.0 && (abs(oceanPlane.z - u_Origin.z) >= 2e3 || abs(oceanPlane.x - u_Origin.x) >= 2e3)) {
+        vec2 uv = (oceanPlane.zx - u_Origin.zx) / 32.0;
+        vec4 t_Color = u_Color;
         t_Color *= texture(u_Texture, vec3(uv, 0));
-        gl_FragColor = t_Color;
-    } else {
-        float elevation = atan(cameraRay.y, length(cameraRay.zx)) * 180.0 / radians(180.0);
-        gl_FragColor = mix(u_SkyBotColor, u_SkyTopColor, clamp(abs(elevation / 45.0), 0.0, 1.0));
+        gl_FragColor = mix(gl_FragColor, t_Color, t_Color.a);
+
+        // slightly overlap water tiles to avoid seam
+        vec4 clipOffset = vec4(0,0,1,0);
+        vec4 clipSpacePos = Mul(u_Projection, Mul(_Mat4x4(u_ViewMatrix), vec4(oceanPlane, 1.0)) + clipOffset);
+        float depthNDC = clipSpacePos.z / clipSpacePos.w;
+        gl_FragDepth = 0.5 + 0.5 * depthNDC;
     }
 }
 #else
 void main() {
-    vec4 t_Color = v_Color;
-    t_Color.rgb += u_AmbientColor.rgb;
+    vec4 t_Color = v_Color + u_Color;
     if (v_TexCoord.z >= 0.0)
         t_Color *= texture(u_Texture, v_TexCoord);
-    if (alphaThreshold >= 0.0 ? t_Color.a < alphaThreshold : t_Color.a >= -alphaThreshold) discard;
+#ifdef ALPHA_TEST
+    if (t_Color.a ALPHA_TEST) discard;
+#endif
     gl_FragColor = t_Color;
 }
 #endif

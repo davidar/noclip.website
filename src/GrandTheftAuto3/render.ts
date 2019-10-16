@@ -96,7 +96,7 @@ export class TextureArray extends TextureMapping {
         let mip = pixels;
         let w = width;
         let h = height;
-        while (w > 1) {
+        while (w > 1 && h > 1) {
             mip = halve(mip, w, h * textures.length);
             mipmaps.push(mip);
             w = Math.max((w / 2) | 0, 1);
@@ -133,6 +133,11 @@ export class TextureArray extends TextureMapping {
     }
 }
 
+interface GTA3ProgramDef {
+    ALPHA_TEST?: string;
+    SKY?: string;
+}
+
 class GTA3Program extends DeviceProgram {
     public static a_Position = 0;
     public static a_Color = 1;
@@ -143,18 +148,27 @@ class GTA3Program extends DeviceProgram {
 
     private static program = readFileSync('src/GrandTheftAuto3/program.glsl', { encoding: 'utf8' });
     public both = GTA3Program.program;
+
+    constructor(def: GTA3ProgramDef = {}) {
+        super();
+        if (def.ALPHA_TEST !== undefined)
+            this.defines.set('ALPHA_TEST', def.ALPHA_TEST);
+        if (def.SKY !== undefined)
+            this.defines.set('SKY', def.SKY);
+    }
 }
 
-const mainProgram = new GTA3Program();
-const skyProgram = new GTA3Program();
-skyProgram.defines.set('SKY', '1');
+const opaqueProgram = new GTA3Program();
+const dualPassCoreProgram = new GTA3Program({ ALPHA_TEST: '< 0.9' });
+const dualPassEdgeProgram = new GTA3Program({ ALPHA_TEST: '>= 0.9' });
+const skyProgram = new GTA3Program({ SKY: '1' });
 
 class Renderer {
     protected vertexBuffer: GfxBuffer;
     protected indexBuffer: GfxBuffer;
     protected inputLayout: GfxInputLayout;
     protected inputState: GfxInputState;
-    protected megaStateFlags: Partial<GfxMegaStateDescriptor>;
+    protected megaStateFlags: Partial<GfxMegaStateDescriptor> = {};
     protected gfxProgram?: GfxProgram;
 
     protected indices: number;
@@ -189,7 +203,7 @@ class Renderer {
 }
 
 export class SkyRenderer extends Renderer {
-    constructor(device: GfxDevice, atlas?: TextureArray) {
+    constructor(device: GfxDevice, private origin: vec3, atlas: TextureArray) {
         super(skyProgram, atlas);
         // fullscreen quad
         const vbuf = new Float32Array([
@@ -209,20 +223,16 @@ export class SkyRenderer extends Renderer {
         const buffers = [{ buffer: this.vertexBuffer, byteOffset: 0, byteStride: 3 * 0x04}];
         const indexBuffer = { buffer: this.indexBuffer, byteOffset: 0, byteStride: 0 };
         this.inputState = device.createInputState(this.inputLayout, buffers, indexBuffer);
-        this.megaStateFlags = { depthWrite: false };
     }
 
     public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput, colorSet: ColorSet): undefined {
         if (viewerInput.camera.isOrthographic) return;
         const renderInst = super.prepareToRender(device, renderInstManager, viewerInput, colorSet)!;
         renderInst.sortKey = makeSortKey(GfxRendererLayer.BACKGROUND);
-        let offs = renderInst.allocateUniformBuffer(GTA3Program.ub_MeshFragParams, 12 + 4 + 12 + 4 + 4 + 4);
+        let offs = renderInst.allocateUniformBuffer(GTA3Program.ub_MeshFragParams, 12 + 4 + 12 + 4 + 4 + 4 + 4);
         const mapped = renderInst.mapUniformBufferF32(GTA3Program.ub_MeshFragParams);
         offs += fillMatrix4x3(mapped, offs, viewerInput.camera.viewMatrix);
-        mapped[offs++] = colorSet.amb.r + colorSet.dir.r;
-        mapped[offs++] = colorSet.amb.g + colorSet.dir.g;
-        mapped[offs++] = colorSet.amb.b + colorSet.dir.b;
-        mapped[offs++] = colorSet.amb.a + colorSet.dir.a;
+        offs += fillColor(mapped, offs, colorSet.water);
         offs += fillMatrix4x3(mapped, offs, viewerInput.camera.worldMatrix);
         mapped[offs++] = viewerInput.camera.frustum.right;
         mapped[offs++] = viewerInput.camera.frustum.top;
@@ -230,6 +240,10 @@ export class SkyRenderer extends Renderer {
         mapped[offs++] = viewerInput.camera.frustum.far;
         offs += fillColor(mapped, offs, colorSet.skyTop);
         offs += fillColor(mapped, offs, colorSet.skyBot);
+        // rotate axes from Z-up to Y-up
+        mapped[offs++] = this.origin[1];
+        mapped[offs++] = this.origin[2];
+        mapped[offs++] = this.origin[0];
         return;
     }
 }
@@ -342,7 +356,7 @@ export class DrawKey {
     public drawDistance?: number;
     public timeOn?: number;
     public timeOff?: number;
-    public dynamic: boolean;
+    public water: boolean;
 
     constructor(obj: ObjectDefinition, public zone: string) {
         if (obj.drawDistance < 99) {
@@ -352,15 +366,26 @@ export class DrawKey {
             this.timeOn = obj.timeOn;
             this.timeOff = obj.timeOff;
         }
-        this.dynamic = obj.dynamic;
+        this.water = (obj.modelName === 'water');
     }
 }
 
 export class SceneRenderer extends Renderer {
     public bbox = new AABB();
 
-    constructor(device: GfxDevice, public key: DrawKey, meshes: MeshInstance[], atlas?: TextureArray) {
-        super(mainProgram, atlas);
+    private static programFor(renderLayer: GfxRendererLayer, dual: boolean) {
+        // PS2 alpha test emulation, see http://skygfx.rockstarvision.com/skygfx.html
+        if (dual) {
+            return dualPassEdgeProgram;
+        } else if (!!(renderLayer & GfxRendererLayer.TRANSLUCENT)) {
+            return dualPassCoreProgram;
+        } else {
+            return opaqueProgram;
+        }
+    }
+
+    constructor(device: GfxDevice, public key: DrawKey, meshes: MeshInstance[], dual: boolean, atlas?: TextureArray) {
+        super(SceneRenderer.programFor(key.renderLayer, dual), atlas);
         const skipFrag = (frag: MeshFragData) =>
             atlas !== undefined && frag.texName !== undefined && !atlas.subimages.has(frag.texName);
 
@@ -425,6 +450,7 @@ export class SceneRenderer extends Renderer {
             blendMode: GfxBlendMode.ADD,
             blendDstFactor: GfxBlendFactor.ONE_MINUS_SRC_ALPHA,
             blendSrcFactor: GfxBlendFactor.SRC_ALPHA,
+            depthWrite: !dual,
         };
     }
 
@@ -448,24 +474,13 @@ export class SceneRenderer extends Renderer {
         const renderInst = super.prepareToRender(device, renderInstManager, viewerInput, colorSet)!;
         renderInst.sortKey = setSortKeyDepth(makeSortKey(renderLayer), depth);
 
-        let offs = renderInst.allocateUniformBuffer(GTA3Program.ub_MeshFragParams, 12 + 4 + 4);
+        let offs = renderInst.allocateUniformBuffer(GTA3Program.ub_MeshFragParams, 12 + 4);
         const mapped = renderInst.mapUniformBufferF32(GTA3Program.ub_MeshFragParams);
         offs += fillMatrix4x3(mapped, offs, viewerInput.camera.viewMatrix);
-        if (this.key.dynamic) {
-            mapped[offs++] = colorSet.amb.r + colorSet.dir.r;
-            mapped[offs++] = colorSet.amb.g + colorSet.dir.g;
-            mapped[offs++] = colorSet.amb.b + colorSet.dir.b;
-            mapped[offs++] = colorSet.amb.a + colorSet.dir.a;
+        if (this.key.water) {
+            offs += fillColor(mapped, offs, colorSet.water);
         } else {
             offs += fillColor(mapped, offs, colorSet.amb);
-        }
-        mapped[offs++] = !(renderLayer & GfxRendererLayer.TRANSLUCENT) ? 0.01 : dual ? -0.9 : 0.9;
-
-        // PS2 alpha test emulation, see http://skygfx.rockstarvision.com/skygfx.html
-        if (dual) {
-            renderInst.setMegaStateFlags({ depthWrite: false });
-        } else if (!!(this.key.renderLayer & GfxRendererLayer.TRANSLUCENT)) {
-            this.prepareToRender(device, renderInstManager, viewerInput, colorSet, true);
         }
         return;
     }
@@ -486,7 +501,7 @@ export class GTA3Renderer implements Viewer.SceneGfx {
     private weather = 0;
     private scenarioSelect: UI.SingleSelect;
 
-    constructor(device: GfxDevice, private colorSets: ColorSet[]) {
+    constructor(device: GfxDevice, private colorSets: ColorSet[], private weatherTypes: string[]) {
         this.renderHelper = new GfxRenderHelper(device);
     }
 
@@ -535,7 +550,7 @@ export class GTA3Renderer implements Viewer.SceneGfx {
         scenarioPanel.customHeaderBackgroundColor = UI.COOL_BLUE_COLOR;
         scenarioPanel.setTitle(UI.TIME_OF_DAY_ICON, 'Weather');
 
-        const scenarioNames = ['Sunny', 'Cloudy', 'Rainy', 'Foggy'];
+        const scenarioNames = this.weatherTypes;
 
         this.scenarioSelect = new UI.SingleSelect();
         this.scenarioSelect.setStrings(scenarioNames);
