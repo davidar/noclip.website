@@ -16,7 +16,7 @@ import { GfxRenderHelper } from "../gfx/render/GfxRenderGraph";
 import { assert } from "../util";
 import { BasicRenderTarget, standardFullClearRenderPassDescriptor } from "../gfx/helpers/RenderTargetHelpers";
 import { GfxRenderInstManager, GfxRendererLayer, makeSortKey, setSortKeyDepth, GfxRenderInst } from "../gfx/render/GfxRenderer";
-import { ItemInstance, ObjectDefinition } from "./item";
+import { ItemInstance, ObjectDefinition, ObjectFlags } from "./item";
 import { colorNew, White, colorNewCopy, colorMult, Color } from "../Color";
 import { ColorSet, emptyColorSet, lerpColorSet } from "./time";
 import { AABB } from "../Geometry";
@@ -28,32 +28,59 @@ export class Texture implements TextureBase {
     public format: number;
     public width: number;
     public height: number;
-    public depth: number;
     public pixels: Uint8Array;
+    public pixelFormat: GfxFormat;
 
-    constructor(texture: rw.Texture, txdName: string) {
+    constructor(texture: rw.Texture, txdName: string, useDXT = true) {
         this.name = txdName + '/' + texture.name.toLowerCase();
         this.format = texture.raster.format;
-        const image = texture.raster.toImage();
-        image.unindex();
-        this.width = image.width;
-        this.height = image.height;
-        this.depth = image.depth;
-        this.pixels = image.pixels!.slice();
-        image.delete();
+        if (useDXT && texture.raster.platform === rw.Platform.PLATFORM_D3D8) {
+            const r = texture.raster.toD3dRaster();
+            if (r.customFormat) {
+                switch(r.format) {
+                    case rw.Raster.Format.D3DFMT_DXT1:
+                        this.pixelFormat = GfxFormat.BC1;
+                        break;
+                    case rw.Raster.Format.D3DFMT_DXT2:
+                    case rw.Raster.Format.D3DFMT_DXT3:
+                        this.pixelFormat = GfxFormat.BC2;
+                        break;
+                    case rw.Raster.Format.D3DFMT_DXT4:
+                    case rw.Raster.Format.D3DFMT_DXT5:
+                        this.pixelFormat = GfxFormat.BC3;
+                        break;
+                    default:
+                        throw new Error('unrecognised custom texture format');
+                }
+                assert(r.texture.length > 0);
+                const level = r.texture.level(0);
+                this.width  = level.width;
+                this.height = level.height;
+                this.pixels = level.data!.slice();
+            }
+        }
+        if (this.pixels === undefined) {
+            const image = texture.raster.toImage();
+            image.unindex();
+            this.width  = image.width;
+            this.height = image.height;
+            this.pixels = image.pixels!.slice();
+            this.pixelFormat = (image.depth === 32) ? GfxFormat.U8_RGBA : GfxFormat.U8_RGB;
+            image.delete();
+        }
     }
 }
 
-function halve(pixels: Uint8Array, width: number, height: number): Uint8Array {
-    const halved = new Uint8Array(width * height);
+function halve(pixels: Uint8Array, width: number, height: number, bpp: number): Uint8Array {
+    const halved = new Uint8Array(bpp * width/2 * height/2);
     for (let y = 0; y < height/2; y++) {
         for (let x = 0; x < width/2; x++) {
-            for (let i = 0; i < 4; i++) {
-                halved[4 * (x + y * width/2) + i] =
-                    ( pixels[4 * ((2*x+0) + (2*y+0) * width) + i]
-                    + pixels[4 * ((2*x+1) + (2*y+0) * width) + i]
-                    + pixels[4 * ((2*x+0) + (2*y+1) * width) + i]
-                    + pixels[4 * ((2*x+1) + (2*y+1) * width) + i] ) / 4;
+            for (let i = 0; i < bpp; i++) {
+                halved[bpp * (x + y * width/2) + i] =
+                    ( pixels[bpp * ((2*x+0) + (2*y+0) * width) + i]
+                    + pixels[bpp * ((2*x+1) + (2*y+0) * width) + i]
+                    + pixels[bpp * ((2*x+0) + (2*y+1) * width) + i]
+                    + pixels[bpp * ((2*x+1) + (2*y+1) * width) + i] ) / 4;
             }
         }
     }
@@ -63,48 +90,47 @@ function halve(pixels: Uint8Array, width: number, height: number): Uint8Array {
 export class TextureArray extends TextureMapping {
     public subimages = new Map<string, number>();
 
-    constructor(device: GfxDevice, textures: Texture[]) {
+    constructor(device: GfxDevice, textures: Texture[], mipFilter: GfxMipFilterMode, public transparent: boolean) {
         super();
         assert(textures.length > 0);
         const width = textures[0].width;
         const height = textures[0].height;
+        const size = textures[0].pixels.byteLength;
+        const pixelFormat = textures[0].pixelFormat;
         for (let i = 0; i < textures.length; i++) {
             const texture = textures[i];
-            assert(texture.width === width && texture.height === height);
+            assert(texture.width === width && texture.height === height && texture.pixelFormat === pixelFormat && texture.pixels.byteLength === size);
             this.subimages.set(texture.name, i);
         }
 
-        const pixels = new Uint8Array(4 * width * height * textures.length);
-        let offs = 0;
-        for (const texture of textures) {
-            let srcOffs = 0;
-            for (let y = 0; y < texture.height; y++) {
-                for (let x = 0; x < texture.width; x++) {
-                    pixels[offs++] = texture.pixels[srcOffs++];
-                    pixels[offs++] = texture.pixels[srcOffs++];
-                    pixels[offs++] = texture.pixels[srcOffs++];
-                    if (texture.depth === 32) {
-                        pixels[offs++] = texture.pixels[srcOffs++];
-                    } else {
-                        pixels[offs++] = 0xFF;
-                    }
-                }
+        let bpp = 0;
+        if (pixelFormat === GfxFormat.U8_RGBA) {
+            bpp = 4;
+        } else if (pixelFormat === GfxFormat.U8_RGB) {
+            bpp = 3;
+        } else {
+            mipFilter = GfxMipFilterMode.NO_MIP;
+        }
+
+        const pixels = new Uint8Array(size * textures.length);
+        for (let i = 0; i < textures.length; i++)
+            pixels.set(textures[i].pixels, i * size);
+
+        const mipmaps = [pixels];
+        if (mipFilter !== GfxMipFilterMode.NO_MIP) {
+            let mip = pixels;
+            let w = width;
+            let h = height;
+            while (w > 1 && h > 1) {
+                mip = halve(mip, w, h * textures.length, bpp);
+                mipmaps.push(mip);
+                w = Math.max((w / 2) | 0, 1);
+                h = Math.max((h / 2) | 0, 1);
             }
         }
 
-        const mipmaps = [pixels];
-        let mip = pixels;
-        let w = width;
-        let h = height;
-        while (w > 1 && h > 1) {
-            mip = halve(mip, w, h * textures.length);
-            mipmaps.push(mip);
-            w = Math.max((w / 2) | 0, 1);
-            h = Math.max((h / 2) | 0, 1);
-        }
-
         const gfxTexture = device.createTexture({
-            dimension: GfxTextureDimension.n2D_ARRAY, pixelFormat: GfxFormat.U8_RGBA,
+            dimension: GfxTextureDimension.n2D_ARRAY, pixelFormat,
             width, height, depth: textures.length, numLevels: mipmaps.length
         });
         const hostAccessPass = device.createHostAccessPass();
@@ -119,7 +145,7 @@ export class TextureArray extends TextureMapping {
         this.gfxSampler = device.createSampler({
             magFilter: GfxTexFilterMode.BILINEAR,
             minFilter: GfxTexFilterMode.BILINEAR,
-            mipFilter: GfxMipFilterMode.LINEAR,
+            mipFilter,
             minLOD: 0,
             maxLOD: 1000,
             wrapS: GfxWrapMode.REPEAT,
@@ -357,6 +383,7 @@ export class DrawKey {
     public timeOn?: number;
     public timeOff?: number;
     public water: boolean;
+    public additive: boolean;
 
     constructor(obj: ObjectDefinition, public zone: string) {
         if (obj.drawDistance < 99) {
@@ -367,6 +394,7 @@ export class DrawKey {
             this.timeOff = obj.timeOff;
         }
         this.water = (obj.modelName === 'water');
+        this.additive = !!(obj.flags & ObjectFlags.ADDITIVE);
     }
 }
 
@@ -448,7 +476,7 @@ export class SceneRenderer extends Renderer {
         this.inputState = device.createInputState(this.inputLayout, buffers, indexBuffer);
         this.megaStateFlags = {
             blendMode: GfxBlendMode.ADD,
-            blendDstFactor: GfxBlendFactor.ONE_MINUS_SRC_ALPHA,
+            blendDstFactor: this.key.additive ? GfxBlendFactor.ONE : GfxBlendFactor.ONE_MINUS_SRC_ALPHA,
             blendSrcFactor: GfxBlendFactor.SRC_ALPHA,
             depthWrite: !dual,
         };

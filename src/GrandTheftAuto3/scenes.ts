@@ -1,7 +1,7 @@
 
 import * as Viewer from '../viewer';
 import * as rw from 'librw';
-import { GfxDevice } from '../gfx/platform/GfxPlatform';
+import { GfxDevice, GfxMipFilterMode, GfxFormat } from '../gfx/platform/GfxPlatform';
 import { DataFetcher } from '../DataFetcher';
 import { GTA3Renderer, SceneRenderer, DrawKey, Texture, TextureArray, MeshInstance, ModelCache, SkyRenderer } from './render';
 import { SceneContext } from '../SceneBase';
@@ -139,10 +139,11 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
         return parseWaterPro(buffer.createDataView(), this.water.origin);
     }
 
-    private async fetchTXD(dataFetcher: DataFetcher, txdName: string, textures: Map<string, Texture>): Promise<void> {
+    private async fetchTXD(device: GfxDevice, dataFetcher: DataFetcher, txdName: string, cb: (texture: Texture) => void): Promise<void> {
         const txdPath = (txdName === 'generic' || txdName === 'particle')
                       ? `models/${txdName}.txd`
                       : `models/gta3/${txdName}.txd`;
+        const useDXT = device.queryTextureFormatSupported(GfxFormat.BC1) && !(txdName === 'generic' || txdName === 'particle');
         const buffer = await this.fetch(dataFetcher, txdPath);
         const stream = new rw.StreamMemory(buffer.createTypedArray(Uint8Array));
         const header = new rw.ChunkHeaderInfo(stream);
@@ -151,8 +152,8 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
         header.delete();
         stream.delete();
         for (let lnk = txd.textures.begin; !lnk.is(txd.textures.end); lnk = lnk.next) {
-            const texture = new Texture(rw.Texture.fromDict(lnk), txdName);
-            textures.set(texture.name, texture);
+            const texture = new Texture(rw.Texture.fromDict(lnk), txdName, useDXT);
+            cb(texture);
         }
         txd.delete();
     }
@@ -190,8 +191,18 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
         const [colorSets, zones, water] = await Promise.all([this.fetchTimeCycle(dataFetcher), this.fetchZones(dataFetcher), await this.fetchWater(dataFetcher)]);
         ipls.push(water);
 
+        const renderer = new GTA3Renderer(device, colorSets, this.weatherTypes);
+        const loadedTXD = new Map<string, Promise<void>>();
+        const loadedDFF = new Map<string, Promise<void>>();
+        const textures  = new Map<string, Texture>();
+        const modelCache = new ModelCache();
+        const textureSets = new Map<string, Set<Texture>>();
         const drawKeys = new Map<string, DrawKey>();
-        const layers = new Map<DrawKey, [ItemInstance, ObjectDefinition][]>();
+        const layers = new Map<DrawKey, MeshInstance[]>();
+
+        loadedDFF.set('water', (async () => { })());
+        modelCache.meshData.set('water', [waterMeshFragData(this.water.texture)]);
+
         for (const ipl of ipls) for (const item of ipl.instances) {
             const name = item.modelName;
             const obj = objects.get(name);
@@ -208,81 +219,72 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
                     break;
                 }
             }
+            if (!this.filter(item, obj, zone)) continue;
+
+            if (!loadedTXD.has(obj.txdName))
+                loadedTXD.set(obj.txdName, this.fetchTXD(device, dataFetcher, obj.txdName, texture => textures.set(texture.name, texture)));
+            if (!loadedDFF.has(obj.modelName))
+                loadedDFF.set(obj.modelName, this.fetchDFF(dataFetcher, obj.modelName, clump => modelCache.addModel(clump, obj)));
+            await Promise.all([loadedTXD.get(obj.txdName)!, loadedDFF.get(obj.modelName)!])
+
+            const model = modelCache.meshData.get(item.modelName);
+            if (model === undefined) {
+                console.warn('Missing model', item.modelName);
+                continue;
+            }
+
+            for (const frag of model) {
+                if (frag.texName === undefined) continue;
+                const texture = textures.get(frag.texName);
+                if (texture === undefined) {
+                    console.warn('Missing texture', frag.texName, 'for', item.modelName);
+                    continue;
+                }
+
+                let res = (obj.modelName === 'water') ? 'mip' : '';
+                res += texture.width + 'x' + texture.height + '.' + texture.pixelFormat;
+                if (rw.Raster.formatHasAlpha(texture.format))
+                    res += 'alpha';
+                if (!textureSets.has(res)) textureSets.set(res, new Set());
+                textureSets.get(res)!.add(texture);
+            }
+
             const drawKeyObj = new DrawKey(obj, zone);
             const drawKeyStr = JSON.stringify(drawKeyObj);
             if (!drawKeys.has(drawKeyStr))
                 drawKeys.set(drawKeyStr, drawKeyObj);
             const drawKey = drawKeys.get(drawKeyStr)!;
             if (!layers.has(drawKey)) layers.set(drawKey, []);
-            if (this.filter(item, obj, zone))
-                layers.get(drawKey)!.push([item, obj]);
+            const mesh = new MeshInstance(model, item);
+            layers.get(drawKey)!.push(mesh);
         }
 
-        const renderer = new GTA3Renderer(device, colorSets, this.weatherTypes);
-        const loadedTXD = new Map<string, Promise<void>>();
-        const loadedDFF = new Map<string, Promise<void>>();
-        const textures  = new Map<string, Texture>();
-        const modelCache = new ModelCache();
+        const textureArrays = [] as TextureArray[];
+        for (const [res, textureSet] of textureSets) {
+            const mipFilter = res.startsWith('mip') ? GfxMipFilterMode.LINEAR : GfxMipFilterMode.NO_MIP;
+            const transparent = res.endsWith('alpha');
+            const textures = Array.from(textureSet);
+            for (let i = 0; i < textures.length; i += 0x100)
+                textureArrays.push(new TextureArray(device, textures.slice(i, i + 0x100), mipFilter, transparent));
+        }
 
-        loadedTXD.set('particle', this.fetchTXD(dataFetcher, 'particle', textures));
-        loadedDFF.set('water', (async () => { })());
-        modelCache.meshData.set('water', [waterMeshFragData(this.water.texture)]);
-
-        loadedTXD.get('particle')!.then(() => {
-            const waterTex = textures.get(`particle/${this.water.texture}`)!;
-            console.log(waterTex);
-            renderer.sceneRenderers.push(new SkyRenderer(device, this.water.origin, new TextureArray(device, [waterTex])));
-        });
-
-        for (const [drawKey, items] of layers) {
-            const promises: Promise<void>[] = [];
-            for (const [item, obj] of items) {
-                if (!loadedTXD.has(obj.txdName))
-                    loadedTXD.set(obj.txdName, this.fetchTXD(dataFetcher, obj.txdName, textures));
-                if (!loadedDFF.has(obj.modelName))
-                    loadedDFF.set(obj.modelName, this.fetchDFF(dataFetcher, obj.modelName, clump => modelCache.addModel(clump, obj)));
-                promises.push(loadedTXD.get(obj.txdName)!, loadedDFF.get(obj.modelName)!);
+        for (const [drawKey, layerMeshes] of layers) {
+            for (const atlas of textureArrays) {
+                const key = Object.assign({}, drawKey);
+                if (atlas.transparent || key.water)
+                    key.renderLayer = GfxRendererLayer.TRANSLUCENT;
+                renderer.sceneRenderers.push(new SceneRenderer(device, key, layerMeshes, false, atlas));
+                if (key.renderLayer === GfxRendererLayer.TRANSLUCENT)
+                    renderer.sceneRenderers.push(new SceneRenderer(device, key, layerMeshes, true, atlas));
             }
-            const promise = Promise.all(promises).then(() => {
-                const layerTextures = new Map<string, Set<Texture>>();
-                const layerMeshes: MeshInstance[] = [];
-                for (const [item, obj] of items) {
-                    const model = modelCache.meshData.get(item.modelName);
-                    if (model === undefined) {
-                        console.warn('Missing model', item.modelName);
-                        continue;
-                    }
-                    for (const frag of model) {
-                        if (frag.texName === undefined) continue;
-                        const texture = textures.get(frag.texName);
-                        if (texture === undefined) {
-                            console.warn('Missing texture', frag.texName, 'for', item.modelName);
-                        } else {
-                            let res = texture.width + 'x' + texture.height;
-                            if (rw.Raster.formatHasAlpha(texture.format))
-                                res += 'alpha';
-                            if (!layerTextures.has(res)) layerTextures.set(res, new Set());
-                            layerTextures.get(res)!.add(texture);
-                        }
-                    }
-                    layerMeshes.push(new MeshInstance(model, item));
-                }
-                for (const [res, textures] of layerTextures) {
-                    const key = Object.assign({}, drawKey);
-                    if (res.endsWith('alpha') || key.water)
-                        key.renderLayer = GfxRendererLayer.TRANSLUCENT;
-                    const atlas = (textures.size > 0) ? new TextureArray(device, Array.from(textures)) : undefined;
-                    renderer.sceneRenderers.push(new SceneRenderer(device, key, layerMeshes, false, atlas));
-                    if (key.renderLayer === GfxRendererLayer.TRANSLUCENT)
-                        renderer.sceneRenderers.push(new SceneRenderer(device, key, layerMeshes, true, atlas));
-                }
-            });
-            if (this.complete)
-                await promise;
         }
 
-        if (this.complete)
-            this.assets.clear();
+        await loadedTXD.get('particle')!;
+        const waterTex = textures.get(`particle/${this.water.texture}`)!;
+        const waterAtlas = new TextureArray(device, [waterTex], GfxMipFilterMode.LINEAR, false);
+        renderer.sceneRenderers.push(new SkyRenderer(device, this.water.origin, waterAtlas));
+
+        this.assets.clear();
 
         return renderer;
     }

@@ -64,7 +64,7 @@ void main() {
         gl_FragColor = mix(gl_FragColor, t_Color, t_Color.a);
 
         // slightly overlap water tiles to avoid seam
-        vec4 clipOffset = vec4(0,0,1,0);
+        vec4 clipOffset = 0.01 * vec4(0,0,1,0);
         vec4 clipSpacePos = Mul(u_Projection, Mul(_Mat4x4(u_ViewMatrix), vec4(oceanPlane, 1.0)) + clipOffset);
         float depthNDC = clipSpacePos.z / clipSpacePos.w;
         gl_FragDepth = 0.5 + 0.5 * depthNDC;
