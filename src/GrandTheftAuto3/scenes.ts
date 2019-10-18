@@ -270,12 +270,13 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
 
         for (const [drawKey, layerMeshes] of layers) {
             for (const atlas of textureArrays) {
+                if (!SceneRenderer.applicable(layerMeshes, atlas)) continue;
                 const key = Object.assign({}, drawKey);
                 if (atlas.transparent || key.water)
                     key.renderLayer = GfxRendererLayer.TRANSLUCENT;
-                renderer.sceneRenderers.push(new SceneRenderer(device, key, layerMeshes, false, atlas));
+                renderer.sceneRenderers.push(new SceneRenderer(device, key, layerMeshes, atlas));
                 if (key.renderLayer === GfxRendererLayer.TRANSLUCENT)
-                    renderer.sceneRenderers.push(new SceneRenderer(device, key, layerMeshes, true, atlas));
+                    renderer.sceneRenderers.push(new SceneRenderer(device, key, layerMeshes, atlas, true));
             }
         }
 

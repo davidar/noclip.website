@@ -199,7 +199,7 @@ class Renderer {
 
     protected indices: number;
 
-    constructor(protected program: DeviceProgram, protected atlas?: TextureArray) {}
+    constructor(protected program: DeviceProgram, protected atlas: TextureArray) {}
 
     public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput, colorSet: ColorSet): GfxRenderInst | undefined {
         const renderInst = renderInstManager.pushRenderInst();
@@ -238,14 +238,14 @@ export class SkyRenderer extends Renderer {
              1,  1, 1,
              1, -1, 1,
         ]);
-        const ibuf = new Uint16Array([0,1,2,0,2,3]);
+        const ibuf = new Uint32Array([0,1,2,0,2,3]);
         this.vertexBuffer = makeStaticDataBuffer(device, GfxBufferUsage.VERTEX, vbuf.buffer);
         this.indexBuffer  = makeStaticDataBuffer(device, GfxBufferUsage.INDEX,  ibuf.buffer);
         this.indices = ibuf.length;
         const vertexAttributeDescriptors: GfxVertexAttributeDescriptor[] = [
-            { location: GTA3Program.a_Position, bufferIndex: 0, format: GfxFormat.F32_RGB, bufferByteOffset: 0 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
+            { location: GTA3Program.a_Position, bufferIndex: 0, format: GfxFormat.F32_RGB, bufferByteOffset: 0, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
         ];
-        this.inputLayout = device.createInputLayout({ indexBufferFormat: GfxFormat.U16_R, vertexAttributeDescriptors });
+        this.inputLayout = device.createInputLayout({ indexBufferFormat: GfxFormat.U32_R, vertexAttributeDescriptors });
         const buffers = [{ buffer: this.vertexBuffer, byteOffset: 0, byteStride: 3 * 0x04}];
         const indexBuffer = { buffer: this.indexBuffer, byteOffset: 0, byteStride: 0 };
         this.inputState = device.createInputState(this.inputLayout, buffers, indexBuffer);
@@ -255,21 +255,13 @@ export class SkyRenderer extends Renderer {
         if (viewerInput.camera.isOrthographic) return;
         const renderInst = super.prepareToRender(device, renderInstManager, viewerInput, colorSet)!;
         renderInst.sortKey = makeSortKey(GfxRendererLayer.BACKGROUND);
-        let offs = renderInst.allocateUniformBuffer(GTA3Program.ub_MeshFragParams, 12 + 4 + 12 + 4 + 4 + 4 + 4);
+        let offs = renderInst.allocateUniformBuffer(GTA3Program.ub_MeshFragParams, 4);
         const mapped = renderInst.mapUniformBufferF32(GTA3Program.ub_MeshFragParams);
-        offs += fillMatrix4x3(mapped, offs, viewerInput.camera.viewMatrix);
-        offs += fillColor(mapped, offs, colorSet.water);
-        offs += fillMatrix4x3(mapped, offs, viewerInput.camera.worldMatrix);
-        mapped[offs++] = viewerInput.camera.frustum.right;
-        mapped[offs++] = viewerInput.camera.frustum.top;
-        mapped[offs++] = viewerInput.camera.frustum.near;
-        mapped[offs++] = viewerInput.camera.frustum.far;
-        offs += fillColor(mapped, offs, colorSet.skyTop);
-        offs += fillColor(mapped, offs, colorSet.skyBot);
         // rotate axes from Z-up to Y-up
         mapped[offs++] = this.origin[1];
         mapped[offs++] = this.origin[2];
         mapped[offs++] = this.origin[0];
+        mapped[offs++] = 0;
         return;
     }
 }
@@ -412,20 +404,32 @@ export class SceneRenderer extends Renderer {
         }
     }
 
-    constructor(device: GfxDevice, public key: DrawKey, meshes: MeshInstance[], dual: boolean, atlas?: TextureArray) {
+    private static skipFrag(frag: MeshFragData, atlas: TextureArray) {
+        return frag.texName !== undefined && !atlas.subimages.has(frag.texName);
+    }
+
+    public static applicable(meshes: MeshInstance[], atlas: TextureArray) {
+        for (const inst of meshes) {
+            for (const frag of inst.frags) {
+                if (!SceneRenderer.skipFrag(frag, atlas)) return true;
+            }
+        }
+        return false;
+    }
+
+    constructor(device: GfxDevice, public key: DrawKey, meshes: MeshInstance[], atlas: TextureArray, dual = false) {
         super(SceneRenderer.programFor(key.renderLayer, dual), atlas);
-        const skipFrag = (frag: MeshFragData) =>
-            atlas !== undefined && frag.texName !== undefined && !atlas.subimages.has(frag.texName);
 
         let vertices = 0;
         this.indices = 0;
         for (const inst of meshes) {
             for (const frag of inst.frags) {
-                if (skipFrag(frag)) continue;
+                if (SceneRenderer.skipFrag(frag, atlas)) continue;
                 vertices += frag.vertices;
                 this.indices += frag.indices.length;
             }
         }
+        assert(this.indices > 0);
 
         const points = [] as vec3[];
         const vbuf = new Float32Array(vertices * 10);
@@ -435,7 +439,7 @@ export class SceneRenderer extends Renderer {
         let lastIndex = 0;
         for (const inst of meshes) {
             for (const frag of inst.frags) {
-                if (skipFrag(frag)) continue;
+                if (SceneRenderer.skipFrag(frag, atlas)) continue;
                 const n = frag.vertices;
                 const texLayer = (frag.texName === undefined || atlas === undefined) ? undefined : atlas.subimages.get(frag.texName);
                 for (let i = 0; i < n; i++) {
@@ -455,6 +459,7 @@ export class SceneRenderer extends Renderer {
                     }
                 }
                 for (const index of frag.indices) {
+                    assert(index + lastIndex < vertices);
                     ibuf[ioffs++] = index + lastIndex;
                 }
                 lastIndex += n;
@@ -502,9 +507,8 @@ export class SceneRenderer extends Renderer {
         const renderInst = super.prepareToRender(device, renderInstManager, viewerInput, colorSet)!;
         renderInst.sortKey = setSortKeyDepth(makeSortKey(renderLayer), depth);
 
-        let offs = renderInst.allocateUniformBuffer(GTA3Program.ub_MeshFragParams, 12 + 4);
+        let offs = renderInst.allocateUniformBuffer(GTA3Program.ub_MeshFragParams, 4);
         const mapped = renderInst.mapUniformBufferF32(GTA3Program.ub_MeshFragParams);
-        offs += fillMatrix4x3(mapped, offs, viewerInput.camera.viewMatrix);
         if (this.key.water) {
             offs += fillColor(mapped, offs, colorSet.water);
         } else {
@@ -544,9 +548,18 @@ export class GTA3Renderer implements Viewer.SceneGfx {
         const template = this.renderHelper.renderInstManager.pushTemplateRenderInst();
         template.setBindingLayouts(bindingLayouts);
 
-        let offs = template.allocateUniformBuffer(GTA3Program.ub_SceneParams, 16);
-        const sceneParamsMapped = template.mapUniformBufferF32(GTA3Program.ub_SceneParams);
-        offs += fillMatrix4x4(sceneParamsMapped, offs, viewerInput.camera.projectionMatrix);
+        let offs = template.allocateUniformBuffer(GTA3Program.ub_SceneParams, 16 + 2 * 12 + 4 * 4);
+        const mapped = template.mapUniformBufferF32(GTA3Program.ub_SceneParams);
+        offs += fillMatrix4x4(mapped, offs, viewerInput.camera.projectionMatrix);
+        offs += fillMatrix4x3(mapped, offs, viewerInput.camera.viewMatrix);
+        offs += fillMatrix4x3(mapped, offs, viewerInput.camera.worldMatrix);
+        mapped[offs++] = viewerInput.camera.frustum.right;
+        mapped[offs++] = viewerInput.camera.frustum.top;
+        mapped[offs++] = viewerInput.camera.frustum.near;
+        mapped[offs++] = viewerInput.camera.frustum.far;
+        offs += fillColor(mapped, offs, this.currentColors.skyTop);
+        offs += fillColor(mapped, offs, this.currentColors.skyBot);
+        offs += fillColor(mapped, offs, this.currentColors.water);
 
         for (let i = 0; i < this.sceneRenderers.length; i++) {
             const sceneRenderer = this.sceneRenderers[i];

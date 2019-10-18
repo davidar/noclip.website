@@ -3,17 +3,19 @@ precision mediump float; precision lowp sampler2DArray;
 
 layout(row_major, std140) uniform ub_SceneParams {
     Mat4x4 u_Projection;
-};
-
-layout(row_major, std140) uniform ub_MeshFragParams {
     Mat4x3 u_ViewMatrix;
-    vec4 u_Color;
-#ifdef SKY
     Mat4x3 u_WorldMatrix;
     vec4 u_Frustum;
     vec4 u_SkyTopColor;
     vec4 u_SkyBotColor;
-    vec3 u_Origin;
+    vec4 u_WaterColor;
+};
+
+layout(row_major, std140) uniform ub_MeshFragParams {
+#ifdef SKY
+    vec4 u_Origin;
+#else
+    vec4 u_Color;
 #endif
 };
 
@@ -59,7 +61,7 @@ void main() {
     vec3 oceanPlane = cameraPos + t * cameraRay;
     if (t > 0.0 && (abs(oceanPlane.z - u_Origin.z) >= 2e3 || abs(oceanPlane.x - u_Origin.x) >= 2e3)) {
         vec2 uv = (oceanPlane.zx - u_Origin.zx) / 32.0;
-        vec4 t_Color = u_Color;
+        vec4 t_Color = u_WaterColor;
         t_Color *= texture(u_Texture, vec3(uv, 0));
         gl_FragColor = mix(gl_FragColor, t_Color, t_Color.a);
 
