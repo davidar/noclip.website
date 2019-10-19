@@ -178,13 +178,17 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
     public async createScene(device: GfxDevice, context: SceneContext): Promise<Viewer.SceneGfx> {
         await GTA3SceneDesc.initialise();
         const dataFetcher = context.dataFetcher;
-        const objects = new Map<String, ObjectDefinition>();
+        const objects = new Map<string, ObjectDefinition>();
+        const lodnames = new Set<string>();
 
         if (this.complete)
             await this.fetchIMG(dataFetcher);
 
         const ides = await Promise.all(this.paths.ide.map(id => this.fetchIDE(dataFetcher, id)));
-        for (const ide of ides) for (const obj of ide.objects) objects.set(obj.modelName, obj);
+        for (const ide of ides) for (const obj of ide.objects) {
+            objects.set(obj.modelName, obj);
+            if (obj.modelName.startsWith('lod')) lodnames.add(obj.modelName.substr(3));
+        }
         objects.set('water', waterDefinition);
 
         const ipls = await Promise.all(this.paths.ipl.map(id => this.fetchIPL(dataFetcher, id)));
@@ -205,6 +209,7 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
 
         for (const ipl of ipls) for (const item of ipl.instances) {
             const name = item.modelName;
+            const haslod = lodnames.has(name.substr(3));
             const obj = objects.get(name);
             if (!obj) {
                 console.warn('No definition for object', name);
@@ -250,6 +255,7 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
             }
 
             const drawKeyObj = new DrawKey(obj, zone);
+            if (haslod) delete drawKeyObj.drawDistance;
             const drawKeyStr = JSON.stringify(drawKeyObj);
             if (!drawKeys.has(drawKeyStr))
                 drawKeys.set(drawKeyStr, drawKeyObj);
@@ -268,14 +274,11 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
                 textureArrays.push(new TextureArray(device, textures.slice(i, i + 0x100), mipFilter, transparent));
         }
 
-        for (const [drawKey, layerMeshes] of layers) {
+        for (const [key, layerMeshes] of layers) {
             for (const atlas of textureArrays) {
                 if (!SceneRenderer.applicable(layerMeshes, atlas)) continue;
-                const key = Object.assign({}, drawKey);
-                if (atlas.transparent || key.water)
-                    key.renderLayer = GfxRendererLayer.TRANSLUCENT;
                 renderer.sceneRenderers.push(new SceneRenderer(device, key, layerMeshes, atlas));
-                if (key.renderLayer === GfxRendererLayer.TRANSLUCENT && !key.water)
+                if (key.renderLayer === GfxRendererLayer.TRANSLUCENT)
                     renderer.sceneRenderers.push(new SceneRenderer(device, key, layerMeshes, atlas, true));
             }
         }

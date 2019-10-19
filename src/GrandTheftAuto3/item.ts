@@ -20,12 +20,17 @@ function readItems(text: string, cb: (section: string, line: string[]) => void) 
 
 // https://gtamods.com/wiki/Item_Definition
 export enum ObjectFlags {
+    IS_ROAD = 0x01,
     DO_NOT_FADE = 0x02,
     DRAW_LAST = 0x04,
     ADDITIVE = 0x08,
     IS_SUBWAY = 0x10,
     IGNORE_LIGHTING = 0x20,
     NO_ZBUFFER_WRITE = 0x40,
+    DONT_RECEIVE_SHADOWS = 0x80,
+    IGNORE_DRAW_DISTANCE = 0x100,
+    IS_GLASS_TYPE_1 = 0x200,
+    IS_GLASS_TYPE_2 = 0x400,
 }
 
 export interface ObjectDefinition {

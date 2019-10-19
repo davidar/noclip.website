@@ -374,9 +374,10 @@ export class DrawKey {
     public additive: boolean;
 
     constructor(obj: ObjectDefinition, public zone: string) {
-        if (obj.drawDistance < 99) {
+        if (obj.flags & ObjectFlags.DRAW_LAST)
+            this.renderLayer = GfxRendererLayer.TRANSLUCENT;
+        if (obj.drawDistance < 99 && !(obj.flags & ObjectFlags.IGNORE_DRAW_DISTANCE))
             this.drawDistance = 99;
-        }
         if (obj.tobj) {
             this.timeOn = obj.timeOn;
             this.timeOff = obj.timeOff;
@@ -486,6 +487,8 @@ export class SceneRenderer extends Renderer {
         const hour = Math.floor(viewerInput.time / TIME_FACTOR) % 24;
         const { timeOn, timeOff } = this.key;
         let renderLayer = this.key.renderLayer;
+        if (this.key.water)
+            renderLayer = GfxRendererLayer.TRANSLUCENT;
         if (timeOn !== undefined && timeOff !== undefined) {
             if (timeOn < timeOff && (hour < timeOn || timeOff < hour)) return;
             if (timeOff < timeOn && (hour < timeOn && timeOff < hour)) return;
