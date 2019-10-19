@@ -71,16 +71,25 @@ export class Texture implements TextureBase {
     }
 }
 
+function mod(a: number, b: number) {
+    return (a % b + b) % b;
+}
+
 function halve(pixels: Uint8Array, width: number, height: number, bpp: number): Uint8Array {
-    const halved = new Uint8Array(bpp * width/2 * height/2);
-    for (let y = 0; y < height/2; y++) {
-        for (let x = 0; x < width/2; x++) {
+    const w = Math.max((width / 2) | 0, 1);
+    const h = Math.max((height / 2) | 0, 1);
+    const UNPACK_ALIGNMENT = 4;
+    const rowSize = bpp * width + mod(-(bpp * width), UNPACK_ALIGNMENT);
+    const halvedRowSize = bpp * w + mod(-(bpp * w), UNPACK_ALIGNMENT);
+    const halved = new Uint8Array(halvedRowSize * h);
+    for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
             for (let i = 0; i < bpp; i++) {
-                halved[bpp * (x + y * width/2) + i] =
-                    ( pixels[bpp * ((2*x+0) + (2*y+0) * width) + i]
-                    + pixels[bpp * ((2*x+1) + (2*y+0) * width) + i]
-                    + pixels[bpp * ((2*x+0) + (2*y+1) * width) + i]
-                    + pixels[bpp * ((2*x+1) + (2*y+1) * width) + i] ) / 4;
+                halved[bpp * x + halvedRowSize * y + i] =
+                    ( pixels[bpp * (2*x+0) + rowSize * (2*y+0) + i]
+                    + pixels[bpp * (2*x+1) + rowSize * (2*y+0) + i]
+                    + pixels[bpp * (2*x+0) + rowSize * (2*y+1) + i]
+                    + pixels[bpp * (2*x+1) + rowSize * (2*y+1) + i] ) / 4;
             }
         }
     }
@@ -487,6 +496,8 @@ export class SceneRenderer extends Renderer {
         const hour = Math.floor(viewerInput.time / TIME_FACTOR) % 24;
         const { timeOn, timeOff } = this.key;
         let renderLayer = this.key.renderLayer;
+        if (!this.atlas.transparent)
+            renderLayer = GfxRendererLayer.OPAQUE;
         if (this.key.water)
             renderLayer = GfxRendererLayer.TRANSLUCENT;
         if (timeOn !== undefined && timeOff !== undefined) {
