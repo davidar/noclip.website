@@ -14,6 +14,8 @@ import { AABB } from '../Geometry';
 import { GfxRendererLayer } from '../gfx/render/GfxRenderer';
 import ArrayBufferSlice from '../ArrayBufferSlice';
 
+const assetCache = new Map<string, ArrayBufferSlice>();
+
 function UTF8ToString(array: Uint8Array) {
     let length = 0; while (length < array.length && array[length]) length++;
     return getTextDecoder('utf8')!.decode(array.subarray(0, length));
@@ -38,8 +40,6 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
         ide: [] as string[],
         ipl: [] as string[],
     };
-
-    private assets = new Map<string, ArrayBufferSlice>();
 
     constructor(public id: string, public name: string) {
         this.pathBase = 'GrandTheftAuto3';
@@ -88,15 +88,16 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
             const size = view.getUint32(i + 4, true);
             const name = UTF8ToString(bufferDIR.subarray(i + 8, 24).createTypedArray(Uint8Array)).toLowerCase();
             const data = bufferIMG.subarray(2048 * offset, 2048 * size);
-            this.assets.set(`${this.pathBase}/models/gta3/${name}`, data);
+            assetCache.set(`${this.pathBase}/models/gta3/${name}`, data);
         }
     }
 
     private async fetch(dataFetcher: DataFetcher, path: string): Promise<ArrayBufferSlice> {
-        let buffer = this.assets.get(`${this.pathBase}/${path}`);
+        path = `${this.pathBase}/${path}`;
+        let buffer = assetCache.get(path);
         if (buffer === undefined) {
-            buffer = await dataFetcher.fetchData(`${this.pathBase}/${path}`);
-            this.assets.set(path, buffer);
+            buffer = await dataFetcher.fetchData(path);
+            assetCache.set(path, buffer);
         }
         return buffer;
     }
@@ -181,7 +182,7 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
         const objects = new Map<string, ObjectDefinition>();
         const lodnames = new Set<string>();
 
-        if (this.complete)
+        if (this.complete && assetCache.size === 0)
             await this.fetchIMG(dataFetcher);
 
         const ides = await Promise.all(this.paths.ide.map(id => this.fetchIDE(dataFetcher, id)));
@@ -287,8 +288,6 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
         const waterTex = textures.get(`particle/${this.water.texture}`)!;
         const waterAtlas = new TextureArray(device, [waterTex], GfxMipFilterMode.LINEAR, false);
         renderer.sceneRenderers.push(new SkyRenderer(device, waterAtlas));
-
-        this.assets.clear();
 
         return renderer;
     }
