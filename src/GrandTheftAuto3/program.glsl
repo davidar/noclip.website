@@ -6,17 +6,11 @@ layout(row_major, std140) uniform ub_SceneParams {
     Mat4x3 u_ViewMatrix;
     Mat4x3 u_WorldMatrix;
     vec4 u_Frustum;
+    vec4 u_AmbientColor;
     vec4 u_SkyTopColor;
     vec4 u_SkyBotColor;
     vec4 u_WaterColor;
-};
-
-layout(row_major, std140) uniform ub_MeshFragParams {
-#ifdef SKY
-    vec4 u_Origin;
-#else
-    vec4 u_Color;
-#endif
+    vec4 u_WaterOrigin;
 };
 
 uniform sampler2DArray u_Texture;
@@ -57,10 +51,10 @@ void main() {
     gl_FragColor = mix(u_SkyBotColor, u_SkyTopColor, clamp(abs(elevation / 45.0), 0.0, 1.0));
     gl_FragDepth = 0.0;
 
-    float t = (u_Origin.y - cameraPos.y) / cameraRay.y;
+    float t = (u_WaterOrigin.y - cameraPos.y) / cameraRay.y;
     vec3 oceanPlane = cameraPos + t * cameraRay;
-    if (t > 0.0 && (abs(oceanPlane.z - u_Origin.z) >= 2e3 || abs(oceanPlane.x - u_Origin.x) >= 2e3)) {
-        vec2 uv = (oceanPlane.zx - u_Origin.zx) / 32.0;
+    if (t > 0.0 && (abs(oceanPlane.z - u_WaterOrigin.z) >= 2e3 || abs(oceanPlane.x - u_WaterOrigin.x) >= 2e3)) {
+        vec2 uv = (oceanPlane.zx - u_WaterOrigin.zx) / 32.0;
         vec4 t_Color = u_WaterColor;
         t_Color *= texture(u_Texture, vec3(uv, 0));
         gl_FragColor = mix(gl_FragColor, t_Color, t_Color.a);
@@ -74,7 +68,12 @@ void main() {
 }
 #else
 void main() {
-    vec4 t_Color = v_Color + u_Color;
+#ifdef WATER
+    vec4 t_Color = u_WaterColor;
+#else
+    vec4 t_Color = v_Color;
+    t_Color.rgb += u_AmbientColor.rgb;
+#endif
     if (v_TexCoord.z >= 0.0)
         t_Color *= texture(u_Texture, v_TexCoord);
 #ifdef ALPHA_TEST

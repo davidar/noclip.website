@@ -191,7 +191,7 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
         const [colorSets, zones, water] = await Promise.all([this.fetchTimeCycle(dataFetcher), this.fetchZones(dataFetcher), await this.fetchWater(dataFetcher)]);
         ipls.push(water);
 
-        const renderer = new GTA3Renderer(device, colorSets, this.weatherTypes);
+        const renderer = new GTA3Renderer(device, colorSets, this.weatherTypes, this.water.origin);
         const loadedTXD = new Map<string, Promise<void>>();
         const loadedDFF = new Map<string, Promise<void>>();
         const textures  = new Map<string, Texture>();
@@ -275,7 +275,7 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
                 if (atlas.transparent || key.water)
                     key.renderLayer = GfxRendererLayer.TRANSLUCENT;
                 renderer.sceneRenderers.push(new SceneRenderer(device, key, layerMeshes, atlas));
-                if (key.renderLayer === GfxRendererLayer.TRANSLUCENT)
+                if (key.renderLayer === GfxRendererLayer.TRANSLUCENT && !key.water)
                     renderer.sceneRenderers.push(new SceneRenderer(device, key, layerMeshes, atlas, true));
             }
         }
@@ -283,7 +283,7 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
         await loadedTXD.get('particle')!;
         const waterTex = textures.get(`particle/${this.water.texture}`)!;
         const waterAtlas = new TextureArray(device, [waterTex], GfxMipFilterMode.LINEAR, false);
-        renderer.sceneRenderers.push(new SkyRenderer(device, this.water.origin, waterAtlas));
+        renderer.sceneRenderers.push(new SkyRenderer(device, waterAtlas));
 
         this.assets.clear();
 
