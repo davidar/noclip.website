@@ -303,7 +303,8 @@ class GTASASceneDesc extends GTA3SceneDesc {
     }
 
     protected filter(item: ItemInstance, obj: ObjectDefinition, zone: string) {
-        return item.interior === this.interior || item.interior === INTERIOR_EVERYWHERE;
+        const interior = item.interior! & 0xFF;
+        return interior === this.interior || interior === INTERIOR_EVERYWHERE;
     }
 }
 

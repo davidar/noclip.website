@@ -14,7 +14,7 @@ function readItems(text: string, cb: (section: string, line: string[]) => void) 
         } else if (line === "end") {
             section = null;
         } else {
-            cb(section, line.split(", "));
+            cb(section, line.split(/\s*,\s*/g));
         }
     }
 }
@@ -68,7 +68,7 @@ export interface ItemDefinition {
 export function parseItemDefinition(text: string): ItemDefinition {
     let objects = [] as ObjectDefinition[];
     readItems(text, function(section, line) {
-        if (section === "objs" || section === "tobj") {
+        if (section === "objs" || section === "tobj" || section === "anim") {
             objects.push(parseObjectDefinition(line, section === "tobj"));
         }
     });
