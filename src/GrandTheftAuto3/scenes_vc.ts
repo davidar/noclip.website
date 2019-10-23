@@ -85,6 +85,7 @@ class GTAVCSceneDesc extends GTA3SceneDesc {
                 'washints/washints',
                 'yacht/yacht',
             ],
+            ipl_stream: [],
         };
     }
 

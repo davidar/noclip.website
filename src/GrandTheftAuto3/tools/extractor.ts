@@ -16,9 +16,11 @@ interface Asset {
 function loadDIR(buf: ArrayBuffer) {
     let assets = [] as Asset[];
     let view = new DataView(buf);
-    for (let i = 0; i < buf.byteLength; i += 32) {
+    const start = 8;
+    const dirLength = 32 * view.getUint32(4, true);
+    for (let i = start; i < start + dirLength; i += 32) {
         let offset = view.getUint32(i + 0, true);
-        let size = view.getUint32(i + 4, true);
+        let size = view.getUint16(i + 4, true);
         let name = UTF8ToString(new Uint8Array(buf, i + 8, 24));
         assets.push({ offset, size, name });
     }
@@ -29,11 +31,11 @@ function loadAsset(img: ArrayBuffer, asset: Asset) {
     return img.slice(2048 * asset.offset, 2048 * (asset.offset + asset.size));
 }
 
-const pathBase = "../../../data/GrandTheftAuto3/models/gta3";
+const pathBase = "../../../data/GrandTheftAutoSanAndreas/models/gta3";
 
 function main() {
-    const assets = loadDIR(readFileSync(pathBase + ".dir").buffer);
     const img = readFileSync(pathBase + ".img").buffer;
+    const assets = loadDIR(img);
     mkdirSync(pathBase, { recursive: true });
     for (const asset of assets) {
         const name = asset.name.toLowerCase();

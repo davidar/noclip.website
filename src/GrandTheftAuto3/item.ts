@@ -1,6 +1,7 @@
 
 import { vec3, quat } from "gl-matrix";
 import { AABB } from "../Geometry";
+import { assert } from "../util";
 
 function readItems(text: string, cb: (section: string, line: string[]) => void) {
     const lines = text.split("\n");
@@ -76,7 +77,7 @@ export function parseItemDefinition(text: string): ItemDefinition {
 
 export interface ItemInstance {
     id?: number;
-    modelName: string;
+    modelName?: string;
     translation: vec3;
     scale: vec3;
     rotation: quat;
@@ -114,15 +115,44 @@ export interface ItemPlacement {
 }
 
 export function parseItemPlacement(text: string): ItemPlacement {
-    let instances = [] as ItemInstance[];
+    const instances = [] as ItemInstance[];
     readItems(text, function(section, line) {
         if (section === "inst") instances.push(parseItemInstance(line));
     });
     return { instances };
 }
 
+export function parseItemPlacementBinary(view: DataView) {
+    const instances = [] as ItemInstance[];
+    const n = view.getUint32(4, true);
+    const offset = view.getUint32(7 * 4, true);
+    assert(offset === 0x4c);
+    for (let i = 0; i < n; i++) {
+        const j = offset + 40 * i;
+        const posX = view.getFloat32(j + 0, true);
+        const posY = view.getFloat32(j + 4, true);
+        const posZ = view.getFloat32(j + 8, true);
+        const rotX = view.getFloat32(j + 12, true);
+        const rotY = view.getFloat32(j + 16, true);
+        const rotZ = view.getFloat32(j + 20, true);
+        const rotW = view.getFloat32(j + 24, true);
+        const id = view.getInt32(j + 28, true);
+        const interior = view.getInt32(j + 32, true);
+        const lod = view.getInt32(j + 36, true);
+        instances.push({
+            id,
+            translation: vec3.fromValues(posX, posY, posZ),
+            scale: vec3.fromValues(1, 1, 1),
+            rotation: quat.fromValues(rotX, rotY, rotZ, -rotW),
+            interior,
+            lod,
+        });
+    }
+    return { instances };
+}
+
 export function parseZones(text: string): Map<string, AABB> {
-    let zones = new Map<string, AABB>();
+    const zones = new Map<string, AABB>();
     readItems(text, function(section, [name, type, x1, y1, z1, x2, y2, z2, level]) {
         if (section === "zone" && type === "0")
             zones.set(name, new AABB(Number(x1), Number(y1), Number(z1),

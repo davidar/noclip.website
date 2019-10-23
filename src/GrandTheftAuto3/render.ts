@@ -34,7 +34,8 @@ export class Texture implements TextureBase {
     constructor(texture: rw.Texture, txdName: string, useDXT = true) {
         this.name = txdName + '/' + texture.name.toLowerCase();
         this.format = texture.raster.format;
-        if (useDXT && texture.raster.platform === rw.Platform.PLATFORM_D3D8) {
+        if (useDXT && (texture.raster.platform === rw.Platform.PLATFORM_D3D8 ||
+                       texture.raster.platform === rw.Platform.PLATFORM_D3D9)) {
             const r = texture.raster.toD3dRaster();
             if (r.customFormat) {
                 switch(r.format) {
@@ -60,6 +61,7 @@ export class Texture implements TextureBase {
             }
         }
         if (this.pixels === undefined) {
+            console.warn('Uncompressed texture', this.name);
             const image = texture.raster.toImage();
             image.unindex();
             this.width  = image.width;
@@ -387,7 +389,7 @@ export class DrawKey {
     constructor(obj: ObjectDefinition, public zone: string) {
         if (obj.flags & ObjectFlags.DRAW_LAST) {
             this.renderLayer = GfxRendererLayer.TRANSLUCENT;
-            this.modelName = obj.modelName;
+            //this.modelName = obj.modelName;
         }
         if (obj.drawDistance < 99 && !(obj.flags & ObjectFlags.IGNORE_DRAW_DISTANCE))
             this.drawDistance = 99;
