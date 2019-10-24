@@ -3,31 +3,36 @@ import * as Viewer from '../viewer';
 import * as rw from 'librw';
 import { GfxDevice, GfxFormat } from '../gfx/platform/GfxPlatform';
 import { DataFetcher } from '../DataFetcher';
-import { GTA3Renderer, SceneRenderer, DrawKey, Texture, TextureArray, MeshInstance, ModelCache, SkyRenderer } from './render';
-import { SceneContext } from '../SceneBase';
+import { GTA3Renderer, SceneRenderer, DrawKey, Texture, TextureArray, MeshInstance, ModelCache, SkyRenderer, rwTexture, MeshFragData } from './render';
+import { SceneContext, Destroyable } from '../SceneBase';
 import { getTextDecoder } from '../util';
-import { parseItemPlacement, ItemPlacement, parseItemDefinition, ItemDefinition, ObjectDefinition, ItemInstance, parseZones, parseItemPlacementBinary } from './item';
+import { parseItemPlacement, ItemPlacement, parseItemDefinition, ItemDefinition, ObjectDefinition, ItemInstance, parseZones, parseItemPlacementBinary, createItemInstance } from './item';
 import { parseTimeCycle, ColorSet } from './time';
-import { parseWaterPro, waterMeshFragData, waterDefinition } from './water';
-import { vec3 } from 'gl-matrix';
+import { parseWaterPro, waterMeshFragData, waterDefinition, parseWater } from './water';
+import { vec4 } from 'gl-matrix';
 import { AABB } from '../Geometry';
 import { GfxRendererLayer } from '../gfx/render/GfxRenderer';
 import ArrayBufferSlice from '../ArrayBufferSlice';
-
-const assetCache = new Map<string, ArrayBufferSlice>();
 
 function UTF8ToString(array: Uint8Array) {
     let length = 0; while (length < array.length && array[length]) length++;
     return getTextDecoder('utf8')!.decode(array.subarray(0, length));
 }
 
+class AssetCache extends Map<string, ArrayBufferSlice> implements Destroyable {
+    destroy(device: GfxDevice) {
+        this.clear();
+    }
+}
+
 export class GTA3SceneDesc implements Viewer.SceneDesc {
     private static initialised = false;
+    private assetCache: AssetCache;
 
     protected pathBase: string;
     protected complete: boolean;
     protected water = {
-        origin: vec3.create(),
+        origin: vec4.fromValues(0, 0, 0, 2048),
         texture: 'water_old',
     };
     protected weatherTypes = ['Sunny', 'Cloudy', 'Rainy', 'Foggy'];
@@ -35,7 +40,7 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
         zon: 'data/gta3.zon',
         dat: {
             timecyc: 'data/timecyc.dat',
-            waterpro: 'data/waterpro.dat',
+            water: 'data/waterpro.dat',
         },
         ide: [] as string[],
         ipl: [] as string[],
@@ -80,7 +85,7 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
     }
 
     private async fetchIMG(dataFetcher: DataFetcher): Promise<void> {
-        if (assetCache.has(`${this.pathBase}/models/gta3.img`)) return;
+        if (this.assetCache.has(`${this.pathBase}/models/gta3.img`)) return;
         const v1 = (this.versionIMG === 1);
         const bufferIMG = await this.fetch(dataFetcher, 'models/gta3.img');
         const bufferDIR = v1 ? await this.fetch(dataFetcher, 'models/gta3.dir') : bufferIMG;
@@ -92,13 +97,13 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
             const size = v1 ? view.getUint32(i + 4, true) : view.getUint16(i + 4, true);
             const name = UTF8ToString(bufferDIR.subarray(i + 8, 24).createTypedArray(Uint8Array)).toLowerCase();
             const data = bufferIMG.subarray(2048 * offset, 2048 * size);
-            assetCache.set(`${this.pathBase}/models/gta3/${name}`, data);
+            this.assetCache.set(`${this.pathBase}/models/gta3/${name}`, data);
         }
     }
 
     private async fetch(dataFetcher: DataFetcher, path: string): Promise<ArrayBufferSlice> {
         path = `${this.pathBase}/${path}`;
-        let buffer = assetCache.get(path);
+        let buffer = this.assetCache.get(path);
         if (buffer === undefined) {
             buffer = await dataFetcher.fetchData(path);
         }
@@ -125,7 +130,7 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
     private async fetchTimeCycle(dataFetcher: DataFetcher): Promise<ColorSet[]> {
         const buffer = await this.fetch(dataFetcher, this.paths.dat.timecyc);
         const text = getTextDecoder('utf8')!.decode(buffer.createDataView());
-        return parseTimeCycle(text);
+        return parseTimeCycle(text, this.paths.dat.timecyc);
     }
 
     private async fetchZones(dataFetcher: DataFetcher): Promise<Map<string, AABB>> {
@@ -134,9 +139,14 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
         return parseZones(text);
     }
 
-    private async fetchWater(dataFetcher: DataFetcher): Promise<ItemPlacement> {
-        const buffer = await this.fetch(dataFetcher, this.paths.dat.waterpro);
-        return parseWaterPro(buffer.createDataView(), this.water.origin);
+    private async fetchWater(dataFetcher: DataFetcher): Promise<[ItemPlacement, MeshFragData[]]> {
+        const buffer = await this.fetch(dataFetcher, this.paths.dat.water);
+        if (this.paths.dat.water.endsWith('water.dat')) {
+            const text = getTextDecoder('utf8')!.decode(buffer.createDataView());
+            return [{ instances: [createItemInstance('water')] }, parseWater(text, this.water.texture)];
+        } else {
+            return [parseWaterPro(buffer.createDataView(), this.water.origin), [waterMeshFragData(this.water.texture)]];
+        }
     }
 
     private async fetchTXD(device: GfxDevice, dataFetcher: DataFetcher, txdName: string, cb: (texture: Texture) => void): Promise<void> {
@@ -150,7 +160,7 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
         if (header.type === rw.PluginID.ID_TEXDICTIONARY) {
             const txd = new rw.TexDictionary(stream);
             for (let lnk = txd.textures.begin; !lnk.is(txd.textures.end); lnk = lnk.next) {
-                const texture = new Texture(rw.Texture.fromDict(lnk), txdName, useDXT);
+                const texture = rwTexture(rw.Texture.fromDict(lnk), txdName, useDXT);
                 cb(texture);
             }
             txd.delete();
@@ -188,6 +198,7 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
         const objectIDs = new Map<number, string>();
         const lodnames = new Set<string>();
 
+        this.assetCache = await context.dataShare.ensureObject<AssetCache>(this.pathBase, async () => new AssetCache());
         if (this.complete)
             await this.fetchIMG(dataFetcher);
 
@@ -203,7 +214,8 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
             this.paths.ipl.map(id => this.fetchIPL(dataFetcher, id)).concat(
             this.paths.ipl_stream.map(id => this.fetchIPL(dataFetcher, id, true))));
         const [colorSets, zones] = await Promise.all([this.fetchTimeCycle(dataFetcher), this.fetchZones(dataFetcher)]);
-        //ipls.push(await this.fetchWater(dataFetcher));
+        const [waterIPL, waterMesh] = await this.fetchWater(dataFetcher);
+        ipls.push(waterIPL);
 
         const renderer = new GTA3Renderer(device, colorSets, this.weatherTypes, this.water.origin);
         const loadedDFF = new Map<string, Promise<void>>();
@@ -214,7 +226,7 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
         const layers = new Map<DrawKey, MeshInstance[]>();
 
         loadedDFF.set('water', (async () => { })());
-        modelCache.meshData.set('water', [waterMeshFragData(this.water.texture)]);
+        modelCache.meshData.set('water', waterMesh);
 
         for (const ipl of ipls) for (const item of ipl.instances) {
             if (item.modelName === undefined && item.id !== undefined) {
@@ -274,13 +286,11 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
         const textureArrays = [] as TextureArray[];
         for (const [txdName, texNames] of texturesUsed) {
             await this.fetchTXD(device, dataFetcher, txdName, texture => {
-                if (texture.pixels === undefined) return;
                 const texName = texture.name;
                 if (!texNames.has(texName)) return;
                 texNames.delete(texName);
 
-                let res = '';
-                res += texture.width + 'x' + texture.height + '.' + texture.pixelFormat;
+                const res = `${texture.width}x${texture.height}.${texture.pixelFormat}x${texture.levels.length}`;
                 if (!textureSets.has(res)) textureSets.set(res, new Set());
                 const textureSet = textureSets.get(res)!;
                 textureSet.add(texture);
@@ -307,12 +317,12 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
             }
         }
 
-        /*
-        await loadedTXD.get('particle')!;
-        const waterTex = textures.get(`particle/${this.water.texture}`)!;
-        const waterAtlas = new TextureArray(device, [waterTex]);
-        renderer.sceneRenderers.push(new SkyRenderer(device, waterAtlas));
-        */
+        await this.fetchTXD(device, dataFetcher, 'particle', texture => {
+            if (texture.name === `particle/${this.water.texture}`) {
+                const atlas = new TextureArray(device, [texture]);
+                renderer.sceneRenderers.push(new SkyRenderer(device, atlas));
+            }
+        });
 
         return renderer;
     }

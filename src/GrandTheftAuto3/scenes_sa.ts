@@ -2,15 +2,15 @@
 import { GTA3SceneDesc } from './scenes';
 import { SceneGroup } from '../viewer';
 import { ItemInstance, ObjectDefinition, INTERIOR_EVERYWHERE } from './item';
-import { vec3 } from 'gl-matrix';
+import { vec4 } from 'gl-matrix';
 
 class GTASASceneDesc extends GTA3SceneDesc {
     constructor(private interior: number, name: string) {
         super(String(interior), name);
         this.pathBase = 'GrandTheftAutoSanAndreas';
-        this.complete = false;
+        this.complete = true;
         this.water = {
-            origin: vec3.fromValues(-400, 0, 6),
+            origin: vec4.fromValues(0, 0, 0, 3000),
             texture: 'waterclear256',
         };
         this.weatherTypes = ['Sunny', 'Cloudy', 'Rainy', 'Foggy', 'Extra Sunny', 'Hurricane'];
@@ -19,7 +19,7 @@ class GTASASceneDesc extends GTA3SceneDesc {
             zon: 'data/info.zon',
             dat: {
                 timecyc: 'data/timecycp.dat',
-                waterpro: 'data/WATERPRO.DAT',
+                water: 'data/water.dat',
             },
             ide: [
                 "country/countn2",

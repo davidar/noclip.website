@@ -87,6 +87,16 @@ export interface ItemInstance {
 
 export const INTERIOR_EVERYWHERE = 13;
 
+export function createItemInstance(modelName: string): ItemInstance {
+    return {
+        modelName,
+        translation: vec3.create(),
+        scale: vec3.fromValues(1,1,1),
+        rotation: quat.fromValues(0,0,0,1),
+        interior: INTERIOR_EVERYWHERE,
+    };
+}
+
 function parseItemInstance(line: string[]): ItemInstance {
     let [id, model, interior, posX, posY, posZ, scaleX, scaleY, scaleZ, rotX, rotY, rotZ, rotW, lod] = [] as (string | undefined)[];
     if (line.length === 12) { // III

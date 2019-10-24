@@ -53,7 +53,8 @@ void main() {
 
     float t = (u_WaterOrigin.y - cameraPos.y) / cameraRay.y;
     vec3 oceanPlane = cameraPos + t * cameraRay;
-    if (t > 0.0 && (abs(oceanPlane.z - u_WaterOrigin.z) >= 2e3 || abs(oceanPlane.x - u_WaterOrigin.x) >= 2e3)) {
+    if (t > 0.0 && (abs(oceanPlane.z - u_WaterOrigin.z) >= u_WaterOrigin.w - 32.0 ||
+                    abs(oceanPlane.x - u_WaterOrigin.x) >= u_WaterOrigin.w - 32.0)) {
         vec2 uv = (oceanPlane.zx - u_WaterOrigin.zx) / 32.0;
         vec4 t_Color = u_WaterColor;
         t_Color *= texture(u_Texture, vec3(uv, 0));

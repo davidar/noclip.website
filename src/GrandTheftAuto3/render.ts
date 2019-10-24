@@ -10,7 +10,7 @@ import { makeStaticDataBuffer } from "../gfx/helpers/BufferHelpers";
 import { DeviceProgram } from "../Program";
 import { convertToTriangleIndexBuffer, filterDegenerateTriangleIndexBuffer, GfxTopology } from "../gfx/helpers/TopologyHelpers";
 import { fillMatrix4x3, fillMatrix4x4, fillColor } from "../gfx/helpers/UniformBufferHelpers";
-import { mat4, quat, vec3, vec2 } from "gl-matrix";
+import { mat4, quat, vec3, vec2, vec4 } from "gl-matrix";
 import { computeViewSpaceDepthFromWorldSpaceAABB, FPSCameraController } from "../Camera";
 import { GfxRenderHelper } from "../gfx/render/GfxRenderGraph";
 import { assert } from "../util";
@@ -23,54 +23,50 @@ import { AABB } from "../Geometry";
 
 const TIME_FACTOR = 2500; // one day cycle per minute
 
-export class Texture implements TextureBase {
-    public name: string;
-    public format: number;
-    public width: number;
-    public height: number;
-    public pixels: Uint8Array;
-    public pixelFormat: GfxFormat;
+export interface Texture extends TextureBase {
+    levels: Uint8Array[];
+    pixelFormat: GfxFormat;
+}
 
-    constructor(texture: rw.Texture, txdName: string, useDXT = true) {
-        this.name = txdName + '/' + texture.name.toLowerCase();
-        this.format = texture.raster.format;
-        if (useDXT && (texture.raster.platform === rw.Platform.PLATFORM_D3D8 ||
-                       texture.raster.platform === rw.Platform.PLATFORM_D3D9)) {
-            const r = texture.raster.toD3dRaster();
-            if (r.customFormat) {
-                switch(r.format) {
-                    case rw.Raster.Format.D3DFMT_DXT1:
-                        this.pixelFormat = GfxFormat.BC1;
-                        break;
-                    case rw.Raster.Format.D3DFMT_DXT2:
-                    case rw.Raster.Format.D3DFMT_DXT3:
-                        this.pixelFormat = GfxFormat.BC2;
-                        break;
-                    case rw.Raster.Format.D3DFMT_DXT4:
-                    case rw.Raster.Format.D3DFMT_DXT5:
-                        this.pixelFormat = GfxFormat.BC3;
-                        break;
-                    default:
-                        throw new Error('unrecognised custom texture format');
-                }
-                assert(r.texture.length > 0);
-                const level = r.texture.level(0);
-                this.width  = level.width;
-                this.height = level.height;
-                this.pixels = level.data!.slice();
-            }
-        }
-        if (this.pixels === undefined) {
-            console.warn('Uncompressed texture', this.name);
-            const image = texture.raster.toImage();
-            image.unindex();
-            this.width  = image.width;
-            this.height = image.height;
-            this.pixels = image.pixels!.slice();
-            this.pixelFormat = (image.depth === 32) ? GfxFormat.U8_RGBA : GfxFormat.U8_RGB;
-            image.delete();
+function convertFormat(format: number) {
+    switch(format) {
+        case rw.Raster.Format.D3DFMT_DXT1:
+            return GfxFormat.BC1;
+        case rw.Raster.Format.D3DFMT_DXT2:
+        case rw.Raster.Format.D3DFMT_DXT3:
+            return GfxFormat.BC2;
+        case rw.Raster.Format.D3DFMT_DXT4:
+        case rw.Raster.Format.D3DFMT_DXT5:
+            return GfxFormat.BC3;
+        default:
+            throw new Error('Unrecognised texture format');
+    }
+}
+
+export function rwTexture(texture: rw.Texture, txdName: string, useDXT = true): Texture {
+    const name = txdName + '/' + texture.name.toLowerCase();
+
+    if (useDXT && (texture.raster.platform === rw.Platform.PLATFORM_D3D8 ||
+                   texture.raster.platform === rw.Platform.PLATFORM_D3D9)) {
+        const r = texture.raster.toD3dRaster();
+        if (r.customFormat) {
+            const pixelFormat = convertFormat(r.format);
+            assert(r.texture.length > 0);
+            const { width, height } = r.texture.level(0);
+            const levels = [];
+            for (let i = 0; i < r.texture.length; i++)
+                levels.push(r.texture.level(i).data!.slice());
+            return { name, width, height, levels, pixelFormat };
         }
     }
+
+    const image = texture.raster.toImage();
+    image.unindex();
+    const { width, height } = image;
+    const levels = [image.pixels!.slice()];
+    const pixelFormat = (image.depth === 32) ? GfxFormat.U8_RGBA : GfxFormat.U8_RGB;
+    image.delete();
+    return { name, width, height, levels, pixelFormat };
 }
 
 function mod(a: number, b: number) {
@@ -106,31 +102,32 @@ export class TextureArray extends TextureMapping {
         assert(textures.length > 0);
         const width = textures[0].width;
         const height = textures[0].height;
-        const size = textures[0].pixels.byteLength;
+        const levels = textures[0].levels.length;
+        const size = textures[0].levels.map(l => l.byteLength);
         const pixelFormat = textures[0].pixelFormat;
         for (let i = 0; i < textures.length; i++) {
             const texture = textures[i];
-            assert(texture.width === width && texture.height === height && texture.pixelFormat === pixelFormat && texture.pixels.byteLength === size);
+            assert(texture.width === width && texture.height === height && texture.levels.length === levels && texture.pixelFormat === pixelFormat);
             this.subimages.set(texture.name, i);
         }
 
         let bpp = 0;
-        let mipFilter = GfxMipFilterMode.LINEAR;
         if (pixelFormat === GfxFormat.U8_RGBA) {
             bpp = 4;
         } else if (pixelFormat === GfxFormat.U8_RGB) {
             bpp = 3;
-        } else {
-            mipFilter = GfxMipFilterMode.NO_MIP;
         }
 
-        const pixels = new Uint8Array(size * textures.length);
-        for (let i = 0; i < textures.length; i++)
-            pixels.set(textures[i].pixels, i * size);
+        const mipmaps = [];
+        for (let i = 0; i < levels; i++) {
+            const pixels = new Uint8Array(size[i] * textures.length);
+            for (let j = 0; j < textures.length; j++)
+                pixels.set(textures[j].levels[i], j * size[i]);
+            mipmaps.push(pixels);
+        }
 
-        const mipmaps = [pixels];
-        if (mipFilter !== GfxMipFilterMode.NO_MIP) {
-            let mip = pixels;
+        if (mipmaps.length === 1 && bpp > 0) {
+            let mip = mipmaps[0];
             let w = width;
             let h = height;
             while (w > 1 && h > 1) {
@@ -157,7 +154,7 @@ export class TextureArray extends TextureMapping {
         this.gfxSampler = device.createSampler({
             magFilter: GfxTexFilterMode.BILINEAR,
             minFilter: GfxTexFilterMode.BILINEAR,
-            mipFilter,
+            mipFilter: (mipmaps.length > 1) ? GfxMipFilterMode.LINEAR : GfxMipFilterMode.NO_MIP,
             minLOD: 0,
             maxLOD: 1000,
             wrapS: GfxWrapMode.REPEAT,
@@ -513,7 +510,7 @@ export class SceneRenderer extends Renderer {
     }
 
     public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput, colorSet: ColorSet, dual = false): undefined {
-        const hour = Math.floor(viewerInput.time / TIME_FACTOR) % 24;
+        const hour = (viewerInput.time / TIME_FACTOR) % 24;
         const { timeOn, timeOff } = this.key;
         if (timeOn !== undefined && timeOff !== undefined) {
             if (timeOn < timeOff && (hour < timeOn || timeOff < hour)) return;
@@ -548,7 +545,7 @@ export class GTA3Renderer implements Viewer.SceneGfx {
     private weather = 0;
     private scenarioSelect: UI.SingleSelect;
 
-    constructor(device: GfxDevice, private colorSets: ColorSet[], private weatherTypes: string[], private waterOrigin: vec3) {
+    constructor(device: GfxDevice, private colorSets: ColorSet[], private weatherTypes: string[], private waterOrigin: vec4) {
         this.renderHelper = new GfxRenderHelper(device);
     }
 
@@ -586,7 +583,7 @@ export class GTA3Renderer implements Viewer.SceneGfx {
         mapped[offs++] = this.waterOrigin[1];
         mapped[offs++] = this.waterOrigin[2];
         mapped[offs++] = this.waterOrigin[0];
-        mapped[offs++] = 0;
+        mapped[offs++] = this.waterOrigin[3];
 
         for (let i = 0; i < this.sceneRenderers.length; i++) {
             const sceneRenderer = this.sceneRenderers[i];
