@@ -545,7 +545,7 @@ export class GTA3Renderer implements Viewer.SceneGfx {
     private weather = 0;
     private scenarioSelect: UI.SingleSelect;
 
-    constructor(device: GfxDevice, private colorSets: ColorSet[], private weatherTypes: string[], private waterOrigin: vec4) {
+    constructor(device: GfxDevice, private colorSets: ColorSet[], private weatherTypes: string[], private weatherPeriods: number, private waterOrigin: vec4) {
         this.renderHelper = new GfxRenderHelper(device);
     }
 
@@ -556,9 +556,9 @@ export class GTA3Renderer implements Viewer.SceneGfx {
     }
 
     public prepareToRender(device: GfxDevice, hostAccessPass: GfxHostAccessPass, viewerInput: Viewer.ViewerRenderInput): void {
-        const t = viewerInput.time / TIME_FACTOR;
-        const cs1 = this.colorSets[Math.floor(t)   % 24 + 24 * this.weather];
-        const cs2 = this.colorSets[Math.floor(t+1) % 24 + 24 * this.weather];
+        const t = viewerInput.time / TIME_FACTOR * this.weatherPeriods / 24;
+        const cs1 = this.colorSets[Math.floor(t)   % this.weatherPeriods + this.weatherPeriods * this.weather];
+        const cs2 = this.colorSets[Math.floor(t+1) % this.weatherPeriods + this.weatherPeriods * this.weather];
         lerpColorSet(this.currentColors, cs1, cs2, t % 1);
 
         viewerInput.camera.setClipPlanes(1);

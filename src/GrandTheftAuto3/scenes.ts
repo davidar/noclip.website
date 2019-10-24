@@ -36,6 +36,7 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
         texture: 'water_old',
     };
     protected weatherTypes = ['Sunny', 'Cloudy', 'Rainy', 'Foggy'];
+    protected weatherPeriods = 24;
     protected paths = {
         zon: 'data/gta3.zon',
         dat: {
@@ -217,7 +218,7 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
         const [waterIPL, waterMesh] = await this.fetchWater(dataFetcher);
         ipls.push(waterIPL);
 
-        const renderer = new GTA3Renderer(device, colorSets, this.weatherTypes, this.water.origin);
+        const renderer = new GTA3Renderer(device, colorSets, this.weatherTypes, this.weatherPeriods, this.water.origin);
         const loadedDFF = new Map<string, Promise<void>>();
         const modelCache = new ModelCache();
         const texturesUsed = new Map<string, Set<string>>();

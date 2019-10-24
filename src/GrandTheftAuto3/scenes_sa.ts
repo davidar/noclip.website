@@ -5,15 +5,45 @@ import { ItemInstance, ObjectDefinition, INTERIOR_EVERYWHERE } from './item';
 import { vec4 } from 'gl-matrix';
 
 class GTASASceneDesc extends GTA3SceneDesc {
-    constructor(private interior: number, name: string) {
-        super(String(interior), name);
+    constructor(private interior: number, name?: string) {
+        super(String(interior), name ? name : `Interior ${interior}`);
         this.pathBase = 'GrandTheftAutoSanAndreas';
         this.complete = true;
         this.water = {
             origin: vec4.fromValues(0, 0, 0, 3000),
             texture: 'waterclear256',
         };
-        this.weatherTypes = ['Sunny', 'Cloudy', 'Rainy', 'Foggy', 'Extra Sunny', 'Hurricane'];
+        this.weatherTypes = [
+            'Los Santos: Extra Sunny',
+            'Los Santos: Sunny',
+            'Los Santos: Extra Sunny Smog',
+            'Los Santos: Sunny Smog',
+            'Los Santos: Cloudy',
+
+            'San Fierro: Sunny',
+            'San Fierro: Extra Sunny',
+            'San Fierro: Cloudy',
+            'San Fierro: Rainy',
+            'San Fierro: Foggy',
+
+            'Las Venturas: Sunny',
+            'Las Venturas: Extra Sunny',
+            'Las Venturas: Cloudy',
+
+            'Countryside: Extra Sunny',
+            'Countryside: Sunny',
+            'Countryside: Cloudy',
+            'Countryside: Rainy',
+
+            'Desert: Extra Sunny',
+            'Desert: Sunny',
+            'Desert: Sandstorm',
+
+            'Underwater',
+            'Interior A',
+            'Interior B',
+        ];
+        this.weatherPeriods = 8;
         this.versionIMG = 2;
         this.paths = {
             zon: 'data/info.zon',
@@ -313,5 +343,22 @@ export const sceneGroup: SceneGroup = {
     name: 'Grand Theft Auto: San Andreas',
     sceneDescs: [
         new GTASASceneDesc(0, 'San Andreas'),
+        new GTASASceneDesc(1),
+        new GTASASceneDesc(2),
+        new GTASASceneDesc(3),
+        new GTASASceneDesc(4),
+        new GTASASceneDesc(5),
+        new GTASASceneDesc(6),
+        new GTASASceneDesc(7),
+        new GTASASceneDesc(8),
+        new GTASASceneDesc(9),
+        new GTASASceneDesc(10),
+        new GTASASceneDesc(11),
+        new GTASASceneDesc(12),
+        new GTASASceneDesc(14),
+        new GTASASceneDesc(15),
+        new GTASASceneDesc(16),
+        new GTASASceneDesc(17),
+        new GTASASceneDesc(18),
     ]
 };
