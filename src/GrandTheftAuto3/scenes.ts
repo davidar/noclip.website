@@ -2,10 +2,10 @@
 import * as Viewer from '../viewer';
 import * as rw from 'librw';
 import { GfxDevice, GfxFormat } from '../gfx/platform/GfxPlatform';
-import { DataFetcher } from '../DataFetcher';
+import { DataFetcher, DataFetcherFlags } from '../DataFetcher';
 import { GTA3Renderer, SceneRenderer, DrawKey, Texture, TextureArray, MeshInstance, ModelCache, SkyRenderer, rwTexture, MeshFragData } from './render';
 import { SceneContext, Destroyable } from '../SceneBase';
-import { getTextDecoder } from '../util';
+import { getTextDecoder, assert } from '../util';
 import { parseItemPlacement, ItemPlacement, parseItemDefinition, ItemDefinition, ObjectDefinition, ItemInstance, parseZones, parseItemPlacementBinary, createItemInstance } from './item';
 import { parseTimeCycle, ColorSet } from './time';
 import { parseWaterPro, waterMeshFragData, waterDefinition, parseWater } from './water';
@@ -21,6 +21,7 @@ function UTF8ToString(array: Uint8Array) {
 
 class AssetCache extends Map<string, ArrayBufferSlice> implements Destroyable {
     destroy(device: GfxDevice) {
+        console.log('Deleting', this.size, 'assets from cache');
         this.clear();
     }
 }
@@ -90,63 +91,68 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
         const v1 = (this.versionIMG === 1);
         const bufferIMG = await this.fetch(dataFetcher, 'models/gta3.img');
         const bufferDIR = v1 ? await this.fetch(dataFetcher, 'models/gta3.dir') : bufferIMG;
-        const view = bufferDIR.createDataView();
+        const view = bufferDIR!.createDataView();
         const start = v1 ? 0 : 8;
         const dirLength = v1 ? view.byteLength : 32 * view.getUint32(4, true);
         for (let i = start; i < start + dirLength; i += 32) {
             const offset = view.getUint32(i + 0, true);
             const size = v1 ? view.getUint32(i + 4, true) : view.getUint16(i + 4, true);
-            const name = UTF8ToString(bufferDIR.subarray(i + 8, 24).createTypedArray(Uint8Array)).toLowerCase();
-            const data = bufferIMG.subarray(2048 * offset, 2048 * size);
+            const name = UTF8ToString(bufferDIR!.subarray(i + 8, 24).createTypedArray(Uint8Array)).toLowerCase();
+            const data = bufferIMG!.subarray(2048 * offset, 2048 * size);
             this.assetCache.set(`${this.pathBase}/models/gta3/${name}`, data);
         }
     }
 
-    private async fetch(dataFetcher: DataFetcher, path: string): Promise<ArrayBufferSlice> {
+    private async fetch(dataFetcher: DataFetcher, path: string): Promise<ArrayBufferSlice | null> {
         path = `${this.pathBase}/${path}`;
         let buffer = this.assetCache.get(path);
         if (buffer === undefined) {
-            buffer = await dataFetcher.fetchData(path);
+            buffer = await dataFetcher.fetchData(path, DataFetcherFlags.ALLOW_404);
+            if (buffer.byteLength === 0) {
+                console.error('Not found', path);
+                return null;
+            }
+            this.assetCache.set(path, buffer);
         }
         return buffer;
     }
 
     private async fetchIDE(dataFetcher: DataFetcher, id: string): Promise<ItemDefinition> {
         const buffer = await this.fetch(dataFetcher, `data/maps/${id}.ide`);
-        const text = getTextDecoder('utf8')!.decode(buffer.createDataView());
+        const text = getTextDecoder('utf8')!.decode(buffer!.createDataView());
         return parseItemDefinition(text);
     }
 
     private async fetchIPL(dataFetcher: DataFetcher, id: string, binary = false): Promise<ItemPlacement> {
         if (binary) {
             const buffer = await this.fetch(dataFetcher, `models/gta3/${id}.ipl`);
-            return parseItemPlacementBinary(buffer.createDataView());
+            return parseItemPlacementBinary(buffer!.createDataView());
         } else {
             const buffer = await this.fetch(dataFetcher, (id === 'props') ? `data/maps/props.IPL` : `data/maps/${id}.ipl`);
-            const text = getTextDecoder('utf8')!.decode(buffer.createDataView());
+            const text = getTextDecoder('utf8')!.decode(buffer!.createDataView());
             return parseItemPlacement(text);
         }
     }
 
     private async fetchTimeCycle(dataFetcher: DataFetcher): Promise<ColorSet[]> {
         const buffer = await this.fetch(dataFetcher, this.paths.dat.timecyc);
-        const text = getTextDecoder('utf8')!.decode(buffer.createDataView());
+        const text = getTextDecoder('utf8')!.decode(buffer!.createDataView());
         return parseTimeCycle(text, this.paths.dat.timecyc);
     }
 
     private async fetchZones(dataFetcher: DataFetcher): Promise<Map<string, AABB>> {
         const buffer = await this.fetch(dataFetcher, this.paths.zon);
-        const text = getTextDecoder('utf8')!.decode(buffer.createDataView());
+        const text = getTextDecoder('utf8')!.decode(buffer!.createDataView());
         return parseZones(text);
     }
 
     private async fetchWater(dataFetcher: DataFetcher): Promise<[ItemPlacement, MeshFragData[]]> {
         const buffer = await this.fetch(dataFetcher, this.paths.dat.water);
         if (this.paths.dat.water.endsWith('water.dat')) {
-            const text = getTextDecoder('utf8')!.decode(buffer.createDataView());
+            const text = getTextDecoder('utf8')!.decode(buffer!.createDataView());
             return [{ instances: [createItemInstance('water')] }, parseWater(text, this.water.texture)];
         } else {
-            return [parseWaterPro(buffer.createDataView(), this.water.origin), [waterMeshFragData(this.water.texture)]];
+            return [parseWaterPro(buffer!.createDataView(), this.water.origin), [waterMeshFragData(this.water.texture)]];
         }
     }
 
@@ -156,18 +162,16 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
                       : `models/gta3/${txdName}.txd`;
         const useDXT = device.queryTextureFormatSupported(GfxFormat.BC1) && !(txdName === 'generic' || txdName === 'particle');
         const buffer = await this.fetch(dataFetcher, txdPath);
+        if (buffer === null) return;
         const stream = new rw.StreamMemory(buffer.createTypedArray(Uint8Array));
         const header = new rw.ChunkHeaderInfo(stream);
-        if (header.type === rw.PluginID.ID_TEXDICTIONARY) {
-            const txd = new rw.TexDictionary(stream);
-            for (let lnk = txd.textures.begin; !lnk.is(txd.textures.end); lnk = lnk.next) {
-                const texture = rwTexture(rw.Texture.fromDict(lnk), txdName, useDXT);
-                cb(texture);
-            }
-            txd.delete();
-        } else {
-            console.error('TXD header type', rw.PluginID[header.type]);
+        assert(header.type === rw.PluginID.ID_TEXDICTIONARY);
+        const txd = new rw.TexDictionary(stream);
+        for (let lnk = txd.textures.begin; !lnk.is(txd.textures.end); lnk = lnk.next) {
+            const texture = rwTexture(rw.Texture.fromDict(lnk), txdName, useDXT);
+            cb(texture);
         }
+        txd.delete();
         header.delete();
         stream.delete();
     }
@@ -175,15 +179,19 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
     private async fetchDFF(dataFetcher: DataFetcher, modelName: string, cb: (clump: rw.Clump) => void): Promise<void> {
         const dffPath = `models/gta3/${modelName}.dff`;
         const buffer = await this.fetch(dataFetcher, dffPath);
+        if (buffer === null) return;
         const stream = new rw.StreamMemory(buffer.createTypedArray(Uint8Array));
-        const header = new rw.ChunkHeaderInfo(stream);
-        if (header.type === rw.PluginID.ID_CLUMP) {
-            const clump = rw.Clump.streamRead(stream);
-            cb(clump);
-            clump.delete();
-        } else {
-            console.error('DFF header type', rw.PluginID[header.type]);
+        let header = new rw.ChunkHeaderInfo(stream);
+        if (header.type === rw.PluginID.ID_UVANIMDICT) {
+            console.log('Found UV animation for', modelName);
+            rw.UVAnimDictionary.current = rw.UVAnimDictionary.streamRead(stream);
+            header.delete();
+            header = new rw.ChunkHeaderInfo(stream);
         }
+        assert(header.type === rw.PluginID.ID_CLUMP);
+        const clump = rw.Clump.streamRead(stream);
+        cb(clump);
+        clump.delete();
         header.delete();
         stream.delete();
     }
@@ -238,7 +246,7 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
                 continue;
             }
             const name = item.modelName;
-            const haslod = lodnames.has(name.substr(3));
+            const haslod = lodnames.has(name.substr(3)) || (item.lod !== undefined && item.lod >= 0);
             const obj = objects.get(name);
             if (!obj) {
                 console.warn('No definition for object', name);
@@ -264,15 +272,24 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
                 console.warn('Missing model', name);
                 continue;
             }
+
+            let transparent = false;
             for (const frag of model) {
                 if (frag.texName === undefined) continue;
                 const txdName = frag.texName.split('/')[0];
                 if (!texturesUsed.has(txdName)) texturesUsed.set(txdName, new Set());
                 texturesUsed.get(txdName)!.add(frag.texName);
+                for (let i = 0; i < frag.vertices; i++) {
+                    if (frag.color(i).a < 1) {
+                        transparent = true;
+                        break;
+                    }
+                }
             }
 
             let drawKey = new DrawKey(obj, zone);
             if (haslod) delete drawKey.drawDistance;
+            if (transparent) drawKey.renderLayer = GfxRendererLayer.TRANSLUCENT;
             const drawKeyStr = JSON.stringify(drawKey);
             if (drawKeys.has(drawKeyStr)) {
                 drawKey = drawKeys.get(drawKeyStr)!;
@@ -291,18 +308,18 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
                 if (!texNames.has(texName)) return;
                 texNames.delete(texName);
 
-                const res = `${texture.width}x${texture.height}.${texture.pixelFormat}x${texture.levels.length}`;
-                if (!textureSets.has(res)) textureSets.set(res, new Set());
-                const textureSet = textureSets.get(res)!;
+                const key = [texture.width, texture.height, texture.pixelFormat, texture.transparent, texture.levels.length].join();
+                if (!textureSets.has(key)) textureSets.set(key, new Set());
+                const textureSet = textureSets.get(key)!;
                 textureSet.add(texture);
                 if (textureSet.size >= 0x100) {
                     textureArrays.push(new TextureArray(device, Array.from(textureSet)));
                     textureSet.clear();
                 }
             });
-            if (texNames.size > 0) console.warn('Missing textures', Array.from(texNames), 'from', txdName);
+            if (texNames.size > 0) console.warn('Missing textures', Array.from(texNames).join());
         }
-        for (const [res, textureSet] of textureSets) {
+        for (const textureSet of textureSets.values()) {
             textureArrays.push(new TextureArray(device, Array.from(textureSet)));
         }
 
@@ -313,7 +330,7 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
             for (const atlas of textureArrays) {
                 if (!SceneRenderer.applicable(layerMeshes, atlas)) continue;
                 renderer.sceneRenderers.push(new SceneRenderer(device, key, layerMeshes, sealevel, atlas));
-                if (key.renderLayer === GfxRendererLayer.TRANSLUCENT)
+                if (key.renderLayer === GfxRendererLayer.TRANSLUCENT && !key.water)
                     renderer.sceneRenderers.push(new SceneRenderer(device, key, layerMeshes, sealevel, atlas, true));
             }
         }
@@ -332,7 +349,6 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
 const id = `GrandTheftAuto3`;
 const name = "Grand Theft Auto III";
 const sceneDescs = [
-    //new GTA3SceneDesc("test", "Test"),
     new GTA3SceneDesc("all", "Liberty City"),
     "Portland",
     new GTA3SceneDesc("industne/industNE", "North-east"),

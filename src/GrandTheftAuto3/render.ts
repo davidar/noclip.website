@@ -26,6 +26,7 @@ const TIME_FACTOR = 2500; // one day cycle per minute
 export interface Texture extends TextureBase {
     levels: Uint8Array[];
     pixelFormat: GfxFormat;
+    transparent: boolean;
 }
 
 function convertFormat(format: number) {
@@ -51,12 +52,13 @@ export function rwTexture(texture: rw.Texture, txdName: string, useDXT = true): 
         const r = texture.raster.toD3dRaster();
         if (r.customFormat) {
             const pixelFormat = convertFormat(r.format);
+            const transparent = r.hasAlpha;
             assert(r.texture.length > 0);
             const { width, height } = r.texture.level(0);
             const levels = [];
             for (let i = 0; i < r.texture.length; i++)
                 levels.push(r.texture.level(i).data!.slice());
-            return { name, width, height, levels, pixelFormat };
+            return { name, width, height, levels, pixelFormat, transparent };
         }
     }
 
@@ -65,8 +67,9 @@ export function rwTexture(texture: rw.Texture, txdName: string, useDXT = true): 
     const { width, height } = image;
     const levels = [image.pixels!.slice()];
     const pixelFormat = (image.depth === 32) ? GfxFormat.U8_RGBA : GfxFormat.U8_RGB;
+    const transparent = image.hasAlpha();
     image.delete();
-    return { name, width, height, levels, pixelFormat };
+    return { name, width, height, levels, pixelFormat, transparent };
 }
 
 function mod(a: number, b: number) {
@@ -96,15 +99,14 @@ function halve(pixels: Uint8Array, width: number, height: number, bpp: number): 
 
 export class TextureArray extends TextureMapping {
     public subimages = new Map<string, number>();
+    public transparent: boolean;
 
     constructor(device: GfxDevice, textures: Texture[]) {
         super();
         assert(textures.length > 0);
-        const width = textures[0].width;
-        const height = textures[0].height;
+        const { width, height, pixelFormat, transparent } = textures[0];
         const levels = textures[0].levels.length;
         const size = textures[0].levels.map(l => l.byteLength);
-        const pixelFormat = textures[0].pixelFormat;
         for (let i = 0; i < textures.length; i++) {
             const texture = textures[i];
             assert(texture.width === width && texture.height === height && texture.levels.length === levels && texture.pixelFormat === pixelFormat);
@@ -150,6 +152,7 @@ export class TextureArray extends TextureMapping {
         this.width = width;
         this.height = height;
         this.flipY = false;
+        this.transparent = transparent;
 
         this.gfxSampler = device.createSampler({
             magFilter: GfxTexFilterMode.BILINEAR,
@@ -388,8 +391,8 @@ export class DrawKey {
             this.renderLayer = GfxRendererLayer.TRANSLUCENT;
             //this.modelName = obj.modelName;
         }
-        if (obj.drawDistance < 99 && !(obj.flags & ObjectFlags.IGNORE_DRAW_DISTANCE))
-            this.drawDistance = 99;
+        if (obj.drawDistance <= 250 && !(obj.flags & ObjectFlags.IGNORE_DRAW_DISTANCE))
+            this.drawDistance = Math.ceil(obj.drawDistance / 50) * 50;
         if (obj.tobj) {
             this.timeOn = obj.timeOn;
             this.timeOff = obj.timeOff;
@@ -500,12 +503,15 @@ export class SceneRenderer extends Renderer {
             depthWrite: !dual,
         };
 
+        let renderLayer = this.key.renderLayer;
+        if (this.atlas !== undefined && this.atlas.transparent)
+            renderLayer = GfxRendererLayer.TRANSLUCENT;
         if (this.key.water) {
             this.sortKey = makeSortKey(GfxRendererLayer.TRANSLUCENT + 1);
-        } else if (this.key.renderLayer === GfxRendererLayer.TRANSLUCENT && this.bbox.minY >= sealevel) {
+        } else if (renderLayer === GfxRendererLayer.TRANSLUCENT && this.bbox.minY >= sealevel) {
             this.sortKey = makeSortKey(GfxRendererLayer.TRANSLUCENT + 2);
         } else {
-            this.sortKey = makeSortKey(this.key.renderLayer);
+            this.sortKey = makeSortKey(renderLayer);
         }
     }
 

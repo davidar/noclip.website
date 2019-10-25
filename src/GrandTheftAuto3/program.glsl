@@ -80,7 +80,6 @@ void main() {
 #ifdef ALPHA_TEST
     if (t_Color.a ALPHA_TEST) discard;
 #endif
-    if (t_Color.a == 0.0) discard;
     gl_FragColor = t_Color;
 }
 #endif
