@@ -181,6 +181,7 @@ class GTA3Program extends DeviceProgram {
     public static a_Position = 0;
     public static a_Color = 1;
     public static a_TexCoord = 2;
+    public static a_TexScroll = 3;
 
     public static ub_SceneParams = 0;
 
@@ -278,6 +279,7 @@ export interface MeshFragData {
     indices: Uint16Array;
     vertices: number;
     texName?: string;
+    texScroll?: vec3;
     position(vertex: number): vec3;
     color(vertex: number): Color;
     texCoord(vertex: number): vec2;
@@ -286,19 +288,27 @@ export interface MeshFragData {
 class RWMeshFragData implements MeshFragData {
     public indices: Uint16Array;
     public texName?: string;
+    public texScroll?: vec3;
 
     private baseColor = colorNewCopy(White);
     private indexMap: number[];
 
     constructor(mesh: rw.Mesh, tristrip: boolean, txdName: string,
                 private positions: Float32Array, private texCoords: Float32Array | null, private colors: Uint8Array | null) {
-        const texture = mesh.material.texture;
+        const { texture, color, uvAnim } = mesh.material;
         if (texture)
             this.texName = txdName + '/' + texture.name.toLowerCase();
-
-        const col = mesh.material.color;
-        if (col)
-            this.baseColor = colorNew(col[0] / 0xFF, col[1] / 0xFF, col[2] / 0xFF, col[3] / 0xFF);
+        if (color)
+            this.baseColor = colorNew(color[0] / 0xFF, color[1] / 0xFF, color[2] / 0xFF, color[3] / 0xFF);
+        for (let i = 0; i < 8; i++) {
+            const ip = uvAnim.interp(i);
+            if (ip === null) continue;
+            const anim = ip.currentAnim;
+            console.log('... on', anim.uv.name);
+            assert(anim.uv.channels![0] === 0);
+            const uv = anim.frame(anim.numFrames - anim.numNodes).uv!;
+            this.texScroll = vec3.fromValues(uv[4], uv[5], anim.duration);
+        }
 
         this.indexMap = Array.from(new Set(mesh.indices)).sort();
 
@@ -449,7 +459,8 @@ export class SceneRenderer extends Renderer {
         assert(this.indices > 0);
 
         const points = [] as vec3[];
-        const vbuf = new Float32Array(vertices * 10);
+        const attrLen = 13;
+        const vbuf = new Float32Array(vertices * attrLen);
         const ibuf = new Uint32Array(this.indices);
         let voffs = 0;
         let ioffs = 0;
@@ -474,6 +485,14 @@ export class SceneRenderer extends Renderer {
                     } else {
                         vbuf[voffs++] = texLayer;
                     }
+                    const texScroll = frag.texScroll;
+                    if (texScroll !== undefined) {
+                        vbuf[voffs++] = texScroll[0];
+                        vbuf[voffs++] = texScroll[1];
+                        vbuf[voffs++] = texScroll[2];
+                    } else {
+                        voffs += 3;
+                    }
                 }
                 for (const index of frag.indices) {
                     assert(index + lastIndex < vertices);
@@ -488,12 +507,13 @@ export class SceneRenderer extends Renderer {
         this.indexBuffer  = makeStaticDataBuffer(device, GfxBufferUsage.INDEX,  ibuf.buffer);
 
         const vertexAttributeDescriptors: GfxVertexAttributeDescriptor[] = [
-            { location: GTA3Program.a_Position,    bufferIndex: 0, format: GfxFormat.F32_RGB,  bufferByteOffset: 0 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
-            { location: GTA3Program.a_Color,       bufferIndex: 0, format: GfxFormat.F32_RGBA, bufferByteOffset: 3 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
-            { location: GTA3Program.a_TexCoord,    bufferIndex: 0, format: GfxFormat.F32_RGB,  bufferByteOffset: 7 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
+            { location: GTA3Program.a_Position,    bufferIndex: 0, format: GfxFormat.F32_RGB,  bufferByteOffset:  0 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
+            { location: GTA3Program.a_Color,       bufferIndex: 0, format: GfxFormat.F32_RGBA, bufferByteOffset:  3 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
+            { location: GTA3Program.a_TexCoord,    bufferIndex: 0, format: GfxFormat.F32_RGB,  bufferByteOffset:  7 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
+            { location: GTA3Program.a_TexScroll,   bufferIndex: 0, format: GfxFormat.F32_RGB,  bufferByteOffset: 10 * 0x04, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
         ];
         this.inputLayout = device.createInputLayout({ indexBufferFormat: GfxFormat.U32_R, vertexAttributeDescriptors });
-        const buffers = [{ buffer: this.vertexBuffer, byteOffset: 0, byteStride: 10 * 0x04}];
+        const buffers = [{ buffer: this.vertexBuffer, byteOffset: 0, byteStride: attrLen * 0x04}];
         const indexBuffer = { buffer: this.indexBuffer, byteOffset: 0, byteStride: 0 };
         this.inputState = device.createInputState(this.inputLayout, buffers, indexBuffer);
         this.megaStateFlags = {
@@ -572,7 +592,7 @@ export class GTA3Renderer implements Viewer.SceneGfx {
         const template = this.renderHelper.renderInstManager.pushTemplateRenderInst();
         template.setBindingLayouts(bindingLayouts);
 
-        let offs = template.allocateUniformBuffer(GTA3Program.ub_SceneParams, 16 + 2 * 12 + 6 * 4);
+        let offs = template.allocateUniformBuffer(GTA3Program.ub_SceneParams, 16 + 2 * 12 + 6 * 4 + 4);
         const mapped = template.mapUniformBufferF32(GTA3Program.ub_SceneParams);
         offs += fillMatrix4x4(mapped, offs, viewerInput.camera.projectionMatrix);
         offs += fillMatrix4x3(mapped, offs, viewerInput.camera.viewMatrix);
@@ -590,6 +610,7 @@ export class GTA3Renderer implements Viewer.SceneGfx {
         mapped[offs++] = this.waterOrigin[2];
         mapped[offs++] = this.waterOrigin[0];
         mapped[offs++] = this.waterOrigin[3];
+        mapped[offs++] = viewerInput.time / 1e3;
 
         for (let i = 0; i < this.sceneRenderers.length; i++) {
             const sceneRenderer = this.sceneRenderers[i];

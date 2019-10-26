@@ -194,6 +194,7 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
         clump.delete();
         header.delete();
         stream.delete();
+        rw.UVAnimDictionary.current = null;
     }
 
     protected filter(item: ItemInstance, obj: ObjectDefinition, zone: string) {
