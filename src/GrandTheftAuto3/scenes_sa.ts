@@ -45,6 +45,7 @@ class GTASASceneDesc extends GTA3SceneDesc {
         ];
         this.weatherPeriods = 8;
         this.versionIMG = 2;
+        this.drawDistanceLimit = 250;
         this.paths = {
             zon: 'data/info.zon',
             dat: {

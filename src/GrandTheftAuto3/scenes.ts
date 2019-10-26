@@ -49,6 +49,7 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
         ipl_stream: [] as string[],
     };
     protected versionIMG = 1;
+    protected drawDistanceLimit = 100;
 
     constructor(public id: string, public name: string) {
         this.pathBase = 'GrandTheftAuto3';
@@ -289,7 +290,8 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
             }
 
             let drawKey = new DrawKey(obj, zone);
-            if (haslod) delete drawKey.drawDistance;
+            if (drawKey.drawDistance !== undefined && (haslod || drawKey.drawDistance > this.drawDistanceLimit))
+                delete drawKey.drawDistance;
             if (transparent) drawKey.renderLayer = GfxRendererLayer.TRANSLUCENT;
             const drawKeyStr = JSON.stringify(drawKey);
             if (drawKeys.has(drawKeyStr)) {

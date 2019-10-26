@@ -401,7 +401,7 @@ export class DrawKey {
             this.renderLayer = GfxRendererLayer.TRANSLUCENT;
             //this.modelName = obj.modelName;
         }
-        if (obj.drawDistance <= 250 && !(obj.flags & ObjectFlags.IGNORE_DRAW_DISTANCE))
+        if (!(obj.flags & ObjectFlags.IGNORE_DRAW_DISTANCE))
             this.drawDistance = Math.ceil(obj.drawDistance / 50) * 50;
         if (obj.tobj) {
             this.timeOn = obj.timeOn;
