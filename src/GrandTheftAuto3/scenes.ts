@@ -3,7 +3,7 @@ import * as Viewer from '../viewer';
 import * as rw from 'librw';
 import { GfxDevice, GfxFormat } from '../gfx/platform/GfxPlatform';
 import { DataFetcher, DataFetcherFlags } from '../DataFetcher';
-import { GTA3Renderer, SceneRenderer, DrawKey, Texture, TextureArray, MeshInstance, ModelCache, SkyRenderer, rwTexture, MeshFragData } from './render';
+import { GTA3Renderer, SceneRenderer, DrawKey, Texture, TextureArray, MeshInstance, ModelCache, SkyRenderer, rwTexture, MeshFragData, DrawParams } from './render';
 import { SceneContext, Destroyable } from '../SceneBase';
 import { getTextDecoder, assert } from '../util';
 import { parseItemPlacement, ItemPlacement, parseItemDefinition, ItemDefinition, ObjectDefinition, ItemInstance, parseZones, parseItemPlacementBinary, createItemInstance } from './item';
@@ -235,8 +235,7 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
         const modelCache = new ModelCache();
         const texturesUsed = new Map<string, Set<string>>();
         const textureSets = new Map<string, Set<Texture>>();
-        const drawKeys = new Map<string, DrawKey>();
-        const layers = new Map<DrawKey, MeshInstance[]>();
+        const layers = new Map<DrawParams, Map<string, MeshInstance[]>>();
 
         loadedDFF.set('water', (async () => { })());
         modelCache.meshData.set('water', waterMesh);
@@ -292,19 +291,20 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
                 }
             }
 
-            let drawKey = new DrawKey(obj, zone);
-            if (drawKey.drawDistance !== undefined && (haslod || drawKey.drawDistance > this.drawDistanceLimit))
-                delete drawKey.drawDistance;
-            if (transparent) drawKey.renderLayer = GfxRendererLayer.TRANSLUCENT;
-            const drawKeyStr = JSON.stringify(drawKey);
-            if (drawKeys.has(drawKeyStr)) {
-                drawKey = drawKeys.get(drawKeyStr)!;
-            } else {
-                drawKeys.set(drawKeyStr, drawKey);
-            }
-            if (!layers.has(drawKey)) layers.set(drawKey, []);
+            let params = new DrawParams(obj);
+            if (params.maxDistance !== undefined && (haslod || params.maxDistance > this.drawDistanceLimit))
+                params.maxDistance = Infinity;
+            if (transparent)
+                params.renderLayer = GfxRendererLayer.TRANSLUCENT;
+            params = params.intern();
+
+            if (!layers.has(params)) layers.set(params, new Map());
+            const meshMap = layers.get(params)!;
+
             const mesh = new MeshInstance(model, item);
-            layers.get(drawKey)!.push(mesh);
+            const meshKey = zone;
+            if (!meshMap.has(meshKey)) meshMap.set(meshKey, []);
+            meshMap.get(meshKey)!.push(mesh);
         }
 
         const textureArrays = [] as TextureArray[];
@@ -329,17 +329,25 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
             textureArrays.push(new TextureArray(device, Array.from(textureSet)));
         }
 
-        const sealevel = this.water.origin[2];
         const cache = renderer.renderHelper.getCache();
-        for (const [key, layerMeshes] of layers) {
-            if (SceneRenderer.applicable(layerMeshes))
-                renderer.sceneRenderers.push(new SceneRenderer(device, cache, key, layerMeshes, sealevel));
-            for (const atlas of textureArrays) {
-                if (!SceneRenderer.applicable(layerMeshes, atlas)) continue;
-                renderer.sceneRenderers.push(new SceneRenderer(device, cache, key, layerMeshes, sealevel, atlas));
-                if (key.renderLayer === GfxRendererLayer.TRANSLUCENT && !key.water)
-                    renderer.sceneRenderers.push(new SceneRenderer(device, cache, key, layerMeshes, sealevel, atlas, true));
+        const sealevel = this.water.origin[2];
+        const uploaded = SceneRenderer.makeVBO(device, cache, layers, textureArrays, sealevel);
+        for (const [params, calls] of uploaded) {
+            const bbox = new AABB(Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity);
+            const indexStart = calls[0].indexStart;
+            let indexCount = 0;
+            for (const call of calls) {
+                bbox.union(bbox, call.bbox);
+                indexCount += call.indexCount;
+
+                renderer.sceneRenderers.push(new SceneRenderer(call, params, false));
+                if (!!(params.renderLayer & GfxRendererLayer.TRANSLUCENT) && !params.water)
+                    renderer.sceneRenderers.push(new SceneRenderer(call, params, true));
             }
+            const call = { bbox, indexStart, indexCount };
+            renderer.sceneRenderers.push(new SceneRenderer(call, params, false, true));
+            if (!!(params.renderLayer & GfxRendererLayer.TRANSLUCENT) && !params.water)
+                renderer.sceneRenderers.push(new SceneRenderer(call, params, true, true));
         }
 
         await this.fetchTXD(device, dataFetcher, 'particle', texture => {

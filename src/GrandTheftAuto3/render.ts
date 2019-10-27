@@ -11,7 +11,7 @@ import { DeviceProgram } from "../Program";
 import { convertToTriangleIndexBuffer, filterDegenerateTriangleIndexBuffer, GfxTopology } from "../gfx/helpers/TopologyHelpers";
 import { fillMatrix4x3, fillMatrix4x4, fillColor } from "../gfx/helpers/UniformBufferHelpers";
 import { mat4, quat, vec3, vec2, vec4 } from "gl-matrix";
-import { computeViewSpaceDepthFromWorldSpaceAABB, FPSCameraController } from "../Camera";
+import { computeViewSpaceDepthFromWorldSpaceAABB, FPSCameraController, computeViewSpaceDepthFromWorldSpacePoint } from "../Camera";
 import { GfxRenderHelper } from "../gfx/render/GfxRenderGraph";
 import { assert } from "../util";
 import { BasicRenderTarget, standardFullClearRenderPassDescriptor } from "../gfx/helpers/RenderTargetHelpers";
@@ -214,14 +214,12 @@ class Renderer {
     protected megaStateFlags: Partial<GfxMegaStateDescriptor> = {};
     protected gfxProgram?: GfxProgram;
 
-    protected indices: number;
-
-    constructor(protected program: DeviceProgram, protected atlas?: TextureArray) {}
+    constructor(protected program: DeviceProgram, protected indexCount: number, protected indexStart = 0, protected atlas?: TextureArray) {}
 
     public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput, colorSet: ColorSet): GfxRenderInst | undefined {
         const renderInst = renderInstManager.pushRenderInst();
         renderInst.setInputLayoutAndState(this.inputLayout, this.inputState);
-        renderInst.drawIndexes(this.indices);
+        renderInst.drawIndexes(this.indexCount, this.indexStart);
 
         if (this.gfxProgram === undefined)
             this.gfxProgram = renderInstManager.gfxRenderCache.createProgram(device, this.program);
@@ -247,7 +245,7 @@ class Renderer {
 
 export class SkyRenderer extends Renderer {
     constructor(device: GfxDevice, cache: GfxRenderCache, atlas: TextureArray) {
-        super(skyProgram, atlas);
+        super(skyProgram, 6, 0, atlas);
         // fullscreen quad
         const vbuf = new Float32Array([
             -1, -1, 1,
@@ -258,7 +256,6 @@ export class SkyRenderer extends Renderer {
         const ibuf = new Uint32Array([0,1,2,0,2,3]);
         this.vertexBuffer = makeStaticDataBuffer(device, GfxBufferUsage.VERTEX, vbuf.buffer);
         this.indexBuffer  = makeStaticDataBuffer(device, GfxBufferUsage.INDEX,  ibuf.buffer);
-        this.indices = ibuf.length;
         const vertexAttributeDescriptors: GfxVertexAttributeDescriptor[] = [
             { location: GTA3Program.a_Position, bufferIndex: 0, format: GfxFormat.F32_RGB, bufferByteOffset: 0, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
         ];
@@ -393,22 +390,23 @@ export class MeshInstance {
     }
 }
 
-export class DrawKey {
-    public renderLayer: GfxRendererLayer = GfxRendererLayer.OPAQUE;
-    public modelName?: string;
-    public drawDistance?: number;
+export class DrawParams {
+    public renderLayer = GfxRendererLayer.OPAQUE;
+    public maxDistance = Infinity;
     public timeOn?: number;
     public timeOff?: number;
-    public water: boolean;
-    public additive: boolean;
+    public water = false;
+    public additive = false;
+    public atlas?: TextureArray;
 
-    constructor(obj: ObjectDefinition, public zone: string) {
-        if (obj.flags & ObjectFlags.DRAW_LAST) {
+    private static internMap = new Map<string, DrawParams>();
+
+    constructor(obj?: ObjectDefinition) {
+        if (obj === undefined) return;
+        if (obj.flags & ObjectFlags.DRAW_LAST)
             this.renderLayer = GfxRendererLayer.TRANSLUCENT;
-            //this.modelName = obj.modelName;
-        }
         if (!(obj.flags & ObjectFlags.IGNORE_DRAW_DISTANCE))
-            this.drawDistance = Math.ceil(obj.drawDistance / 50) * 50;
+            this.maxDistance = Math.ceil(obj.drawDistance / 50) * 50;
         if (obj.tobj) {
             this.timeOn = obj.timeOn;
             this.timeOff = obj.timeOff;
@@ -416,22 +414,51 @@ export class DrawKey {
         this.water = (obj.modelName === 'water');
         this.additive = !!(obj.flags & ObjectFlags.ADDITIVE);
     }
+
+    public intern(): DrawParams {
+        const str = JSON.stringify(this);
+        if (DrawParams.internMap.has(str)) {
+            return DrawParams.internMap.get(str)!;
+        } else {
+            DrawParams.internMap.set(str, this);
+            return this;
+        }
+    }
+
+    public clone(): DrawParams {
+        return Object.assign(new DrawParams(), this);
+    }
 }
 
+export interface DrawCall {
+    bbox: AABB;
+    indexStart: number;
+    indexCount: number;
+}
+
+export interface DrawKey {
+    zone: string;
+    modelName?: string;
+}
+
+const origin = vec3.create();
 const scratchVec2 = vec2.create();
 const scratchVec3 = vec3.create();
 const scratchColor = colorNewCopy(White);
 export class SceneRenderer extends Renderer {
-    public bbox = new AABB();
+    private static vertexBuffer: GfxBuffer;
+    private static indexBuffer: GfxBuffer;
+    private static inputLayout: GfxInputLayout;
+    private static inputState: GfxInputState;
 
     private sortKey: number;
 
-    private static programFor(key: DrawKey, dual: boolean) {
-        if (key.water) return waterProgram;
+    public static programFor(params: DrawParams, dual: boolean): DeviceProgram {
+        if (params.water) return waterProgram;
 
         // PS2 alpha test emulation, see http://skygfx.rockstarvision.com/skygfx.html
         if (dual) return dualPassEdgeProgram;
-        if (!!(key.renderLayer & GfxRendererLayer.TRANSLUCENT)) return dualPassCoreProgram;
+        if (!!(params.renderLayer & GfxRendererLayer.TRANSLUCENT)) return dualPassCoreProgram;
 
         return opaqueProgram;
     }
@@ -453,38 +480,69 @@ export class SceneRenderer extends Renderer {
         return false;
     }
 
-    constructor(device: GfxDevice, cache: GfxRenderCache, public key: DrawKey, meshes: MeshInstance[], sealevel: number, atlas?: TextureArray, dual = false) {
-        super(SceneRenderer.programFor(key, dual), atlas);
-
+    public static makeVBO(device: GfxDevice, cache: GfxRenderCache, layers: Map<DrawParams, Map<string, MeshInstance[]>>, atlases: TextureArray[], sealevel: number) {
+        const frags = new Map<DrawParams, Map<string, [MeshFragData, MeshInstance][]>>();
         let vertices = 0;
-        this.indices = 0;
-        for (const inst of meshes) {
-            for (const frag of inst.frags) {
-                if (!SceneRenderer.keepFrag(frag, atlas)) continue;
-                vertices += frag.vertices;
-                this.indices += frag.indices.length;
+        let indices = 0;
+        for (const [params, meshMap] of layers) {
+            frags.set(params, new Map());
+            const paramsForAtlas = new Map<TextureArray, DrawParams>();
+            for (const atlas of atlases) {
+                const paramsCopy = params.clone();
+                paramsCopy.atlas = atlas;
+                paramsForAtlas.set(atlas, paramsCopy);
+                frags.set(paramsCopy, new Map());
+            }
+
+            for (const [meshKey, meshes] of meshMap) {
+                for (const inst of meshes) {
+                    for (const frag of inst.frags) {
+                        vertices += frag.vertices;
+                        indices += frag.indices.length;
+
+                        let paramsWithAtlas = params;
+                        if (frag.texName !== undefined) {
+                            for (const atlas of atlases) {
+                                if (atlas.subimages.has(frag.texName)) {
+                                    paramsWithAtlas = paramsForAtlas.get(atlas)!;
+                                    break;
+                                }
+                            }
+                            if (paramsWithAtlas === params) {
+                                console.warn('Missing', frag.texName, 'for', inst.item.modelName);
+                                continue;
+                            }
+                        }
+
+                        const meshMap = frags.get(paramsWithAtlas)!;
+                        if (!meshMap.has(meshKey)) meshMap.set(meshKey, []);
+                        meshMap.get(meshKey)!.push([frag, inst]);
+                    }
+                }
             }
         }
-        assert(this.indices > 0);
 
         const attrLen = 13;
         const vbuf = new Float32Array(vertices * attrLen);
-        const ibuf = new Uint32Array(this.indices);
+        const ibuf = new Uint32Array(indices);
+        const output = new Map<DrawParams, DrawCall[]>();
         let voffs = 0;
         let ioffs = 0;
         let lastIndex = 0;
-        for (const inst of meshes) {
-            for (const frag of inst.frags) {
-                if (!SceneRenderer.keepFrag(frag, atlas)) continue;
+        for (const [params, fragMap] of frags) for (const [fragKey, fragInsts] of fragMap) {
+            if (fragInsts.length === 0) continue;
+            const bbox = new AABB(Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity);
+            const indexStart = ioffs;
+            for (const [frag, inst] of fragInsts) {
                 const n = frag.vertices;
-                const texLayer = (frag.texName === undefined || atlas === undefined) ? undefined : atlas.subimages.get(frag.texName);
+                const texLayer = (frag.texName === undefined || params.atlas === undefined) ? undefined : params.atlas.subimages.get(frag.texName);
                 for (let i = 0; i < n; i++) {
                     frag.fillPosition(scratchVec3, i);
                     vec3.transformMat4(scratchVec3, scratchVec3, inst.modelMatrix);
                     vbuf[voffs++] = scratchVec3[0];
                     vbuf[voffs++] = scratchVec3[1];
                     vbuf[voffs++] = scratchVec3[2];
-                    this.bbox.unionPoint(scratchVec3);
+                    bbox.unionPoint(scratchVec3);
                     frag.fillColor(scratchColor, i);
                     voffs += fillColor(vbuf, voffs, scratchColor);
                     frag.fillTexCoord(scratchVec2, i);
@@ -511,6 +569,25 @@ export class SceneRenderer extends Renderer {
                 }
                 lastIndex += n;
             }
+            const indexCount = ioffs - indexStart;
+            const call: DrawCall = { bbox, indexStart, indexCount };
+
+            let renderLayer = params.renderLayer;
+            if (params.atlas !== undefined && params.atlas.transparent)
+                renderLayer = GfxRendererLayer.TRANSLUCENT;
+            if (params.water) {
+                renderLayer = GfxRendererLayer.TRANSLUCENT + 1;
+            } else if (renderLayer === GfxRendererLayer.TRANSLUCENT && call.bbox.minY >= sealevel) {
+                renderLayer = GfxRendererLayer.TRANSLUCENT + 2;
+            }
+
+            let paramsAdjusted = params.clone();
+            paramsAdjusted.renderLayer = renderLayer;
+            paramsAdjusted = paramsAdjusted.intern();
+
+            console.log(paramsAdjusted, call);
+            if (!output.has(paramsAdjusted)) output.set(paramsAdjusted, []);
+            output.get(paramsAdjusted)!.push(call);
         }
 
         this.vertexBuffer = makeStaticDataBuffer(device, GfxBufferUsage.VERTEX, vbuf.buffer);
@@ -526,40 +603,43 @@ export class SceneRenderer extends Renderer {
         const buffers = [{ buffer: this.vertexBuffer, byteOffset: 0, byteStride: attrLen * 0x04}];
         const indexBuffer = { buffer: this.indexBuffer, byteOffset: 0, byteStride: 0 };
         this.inputState = device.createInputState(this.inputLayout, buffers, indexBuffer);
-        this.megaStateFlags = {
-            blendMode: GfxBlendMode.ADD,
-            blendDstFactor: this.key.additive ? GfxBlendFactor.ONE : GfxBlendFactor.ONE_MINUS_SRC_ALPHA,
-            blendSrcFactor: GfxBlendFactor.SRC_ALPHA,
-            depthWrite: !dual,
-            cullMode: this.key.water ? GfxCullMode.NONE : GfxCullMode.BACK,
-        };
 
-        let renderLayer = this.key.renderLayer;
-        if (this.atlas !== undefined && this.atlas.transparent)
-            renderLayer = GfxRendererLayer.TRANSLUCENT;
-        if (this.key.water) {
-            this.sortKey = makeSortKey(GfxRendererLayer.TRANSLUCENT + 1);
-        } else if (renderLayer === GfxRendererLayer.TRANSLUCENT && this.bbox.minY >= sealevel) {
-            this.sortKey = makeSortKey(GfxRendererLayer.TRANSLUCENT + 2);
-        } else {
-            this.sortKey = makeSortKey(renderLayer);
-        }
+        return output;
     }
 
-    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput, colorSet: ColorSet, dual = false): undefined {
+    constructor(private draw: DrawCall, private params: DrawParams, dual: boolean, private wholeMap = false) {
+        super(SceneRenderer.programFor(params, dual), draw.indexCount, draw.indexStart, params.atlas);
+        this.vertexBuffer = SceneRenderer.vertexBuffer;
+        this.indexBuffer = SceneRenderer.indexBuffer;
+        this.inputLayout = SceneRenderer.inputLayout;
+        this.inputState = SceneRenderer.inputState;
+        this.megaStateFlags = {
+            blendMode: GfxBlendMode.ADD,
+            blendDstFactor: params.additive ? GfxBlendFactor.ONE : GfxBlendFactor.ONE_MINUS_SRC_ALPHA,
+            blendSrcFactor: GfxBlendFactor.SRC_ALPHA,
+            depthWrite: !dual,
+            cullMode: params.water ? GfxCullMode.NONE : GfxCullMode.BACK,
+        };
+    }
+
+    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput, colorSet: ColorSet): undefined {
         const hour = (viewerInput.time / TIME_FACTOR) % 24;
-        const { timeOn, timeOff } = this.key;
+        const { timeOn, timeOff } = this.params;
         if (timeOn !== undefined && timeOff !== undefined) {
             if (timeOn < timeOff && (hour < timeOn || timeOff < hour)) return;
             if (timeOff < timeOn && (hour < timeOn && timeOff < hour)) return;
         }
 
-        if (!viewerInput.camera.frustum.contains(this.bbox))
+        if (!viewerInput.camera.frustum.contains(this.draw.bbox))
             return;
 
-        const depth = computeViewSpaceDepthFromWorldSpaceAABB(viewerInput.camera, this.bbox);
-        if (this.key.drawDistance !== undefined && depth > this.bbox.boundingSphereRadius() + 3 * this.key.drawDistance)
+        const depth = computeViewSpaceDepthFromWorldSpaceAABB(viewerInput.camera, this.draw.bbox);
+        if (depth > this.draw.bbox.boundingSphereRadius() + 3 * this.params.maxDistance)
             return;
+
+        const originDepth = computeViewSpaceDepthFromWorldSpacePoint(viewerInput.camera, origin);
+        if (originDepth < 1500 && this.wholeMap) return;
+        if (originDepth >= 1500 && !this.wholeMap) return;
 
         const renderInst = super.prepareToRender(device, renderInstManager, viewerInput, colorSet)!;
         renderInst.sortKey = setSortKeyDepth(this.sortKey, depth);
