@@ -333,9 +333,11 @@ class RWMeshFragData implements MeshFragData {
             const r = this.colors[4*i+0]/0xFF;
             const g = this.colors[4*i+1]/0xFF;
             const b = this.colors[4*i+2]/0xFF;
+            const a = this.colors[4*i+3]/0xFF;
             dst.r *= r;
             dst.g *= g;
             dst.b *= b;
+            dst.a *= a;
         }
     }
 
@@ -430,10 +432,16 @@ export class DrawParams {
     }
 }
 
-export interface DrawCall {
-    bbox: AABB;
-    indexStart: number;
-    indexCount: number;
+export class DrawCall {
+    public bbox = new AABB(Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity);
+    public indexCount = 0;
+    constructor(public key: string, public indexStart: number) {}
+
+    public merge(that: DrawCall) {
+        this.bbox.union(this.bbox, that.bbox);
+        assert(that.indexStart === this.indexStart + this.indexCount);
+        this.indexCount += that.indexCount;
+    }
 }
 
 export interface DrawKey {
@@ -450,8 +458,6 @@ export class SceneRenderer extends Renderer {
     private static indexBuffer: GfxBuffer;
     private static inputLayout: GfxInputLayout;
     private static inputState: GfxInputState;
-
-    private sortKey: number;
 
     public static programFor(params: DrawParams, dual: boolean): DeviceProgram {
         if (params.water) return waterProgram;
@@ -485,36 +491,49 @@ export class SceneRenderer extends Renderer {
         let vertices = 0;
         let indices = 0;
         for (const [params, meshMap] of layers) {
-            frags.set(params, new Map());
-            const paramsForAtlas = new Map<TextureArray, DrawParams>();
-            for (const atlas of atlases) {
-                const paramsCopy = params.clone();
-                paramsCopy.atlas = atlas;
-                paramsForAtlas.set(atlas, paramsCopy);
-                frags.set(paramsCopy, new Map());
-            }
-
             for (const [meshKey, meshes] of meshMap) {
                 for (const inst of meshes) {
                     for (const frag of inst.frags) {
                         vertices += frag.vertices;
                         indices += frag.indices.length;
 
-                        let paramsWithAtlas = params;
+                        let underwater = false;
+                        for (let i = 0; i < frag.vertices; i++) {
+                            frag.fillPosition(scratchVec3, i);
+                            vec3.transformMat4(scratchVec3, scratchVec3, inst.modelMatrix);
+                            if (scratchVec3[1] < sealevel) {
+                                underwater = true;
+                                break;
+                            }
+                        }
+
+                        let renderLayer = params.renderLayer;
+                        if (params.atlas !== undefined && params.atlas.transparent)
+                            renderLayer = GfxRendererLayer.TRANSLUCENT;
+                        if (params.water) {
+                            renderLayer = GfxRendererLayer.TRANSLUCENT + 1;
+                        } else if (renderLayer === GfxRendererLayer.TRANSLUCENT && !underwater) {
+                            renderLayer = GfxRendererLayer.TRANSLUCENT + 2;
+                        }
+
+                        let paramsAdjusted = params.clone();
+                        paramsAdjusted.renderLayer = renderLayer;
                         if (frag.texName !== undefined) {
                             for (const atlas of atlases) {
                                 if (atlas.subimages.has(frag.texName)) {
-                                    paramsWithAtlas = paramsForAtlas.get(atlas)!;
+                                    paramsAdjusted.atlas = atlas;
                                     break;
                                 }
                             }
-                            if (paramsWithAtlas === params) {
+                            if (paramsAdjusted.atlas === undefined) {
                                 console.warn('Missing', frag.texName, 'for', inst.item.modelName);
                                 continue;
                             }
                         }
+                        paramsAdjusted = paramsAdjusted.intern();
 
-                        const meshMap = frags.get(paramsWithAtlas)!;
+                        if (!frags.has(paramsAdjusted)) frags.set(paramsAdjusted, new Map());
+                        const meshMap = frags.get(paramsAdjusted)!;
                         if (!meshMap.has(meshKey)) meshMap.set(meshKey, []);
                         meshMap.get(meshKey)!.push([frag, inst]);
                     }
@@ -529,65 +548,53 @@ export class SceneRenderer extends Renderer {
         let voffs = 0;
         let ioffs = 0;
         let lastIndex = 0;
-        for (const [params, fragMap] of frags) for (const [fragKey, fragInsts] of fragMap) {
-            if (fragInsts.length === 0) continue;
-            const bbox = new AABB(Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity);
-            const indexStart = ioffs;
-            for (const [frag, inst] of fragInsts) {
-                const n = frag.vertices;
-                const texLayer = (frag.texName === undefined || params.atlas === undefined) ? undefined : params.atlas.subimages.get(frag.texName);
-                for (let i = 0; i < n; i++) {
-                    frag.fillPosition(scratchVec3, i);
-                    vec3.transformMat4(scratchVec3, scratchVec3, inst.modelMatrix);
-                    vbuf[voffs++] = scratchVec3[0];
-                    vbuf[voffs++] = scratchVec3[1];
-                    vbuf[voffs++] = scratchVec3[2];
-                    bbox.unionPoint(scratchVec3);
-                    frag.fillColor(scratchColor, i);
-                    voffs += fillColor(vbuf, voffs, scratchColor);
-                    frag.fillTexCoord(scratchVec2, i);
-                    vbuf[voffs++] = scratchVec2[0];
-                    vbuf[voffs++] = scratchVec2[1];
-                    if (texLayer === undefined) {
-                        vbuf[voffs++] = -1;
-                    } else {
-                        vbuf[voffs++] = texLayer;
+        for (const [params, fragMap] of frags) {
+            const keys = Array.from(fragMap.keys()).sort();
+            for (const key of keys) {
+                const fragInsts = fragMap.get(key)!;
+                if (fragInsts.length === 0) continue;
+                const call = new DrawCall(key, ioffs);
+                for (const [frag, inst] of fragInsts) {
+                    const n = frag.vertices;
+                    const texLayer = (frag.texName === undefined || params.atlas === undefined) ? undefined : params.atlas.subimages.get(frag.texName);
+                    for (let i = 0; i < n; i++) {
+                        frag.fillPosition(scratchVec3, i);
+                        vec3.transformMat4(scratchVec3, scratchVec3, inst.modelMatrix);
+                        vbuf[voffs++] = scratchVec3[0];
+                        vbuf[voffs++] = scratchVec3[1];
+                        vbuf[voffs++] = scratchVec3[2];
+                        call.bbox.unionPoint(scratchVec3);
+                        frag.fillColor(scratchColor, i);
+                        voffs += fillColor(vbuf, voffs, scratchColor);
+                        frag.fillTexCoord(scratchVec2, i);
+                        vbuf[voffs++] = scratchVec2[0];
+                        vbuf[voffs++] = scratchVec2[1];
+                        if (texLayer === undefined) {
+                            vbuf[voffs++] = -1;
+                        } else {
+                            vbuf[voffs++] = texLayer;
+                        }
+                        const texScroll = frag.texScroll;
+                        if (texScroll !== undefined) {
+                            vbuf[voffs++] = texScroll[0];
+                            vbuf[voffs++] = texScroll[1];
+                            vbuf[voffs++] = texScroll[2];
+                        } else {
+                            voffs += 3;
+                        }
                     }
-                    const texScroll = frag.texScroll;
-                    if (texScroll !== undefined) {
-                        vbuf[voffs++] = texScroll[0];
-                        vbuf[voffs++] = texScroll[1];
-                        vbuf[voffs++] = texScroll[2];
-                    } else {
-                        voffs += 3;
+                    for (let i = 0; i < frag.indices.length; i++) {
+                        const index = frag.indices[i];
+                        assert(index + lastIndex < vertices);
+                        ibuf[ioffs++] = index + lastIndex;
                     }
+                    lastIndex += n;
                 }
-                for (let i = 0; i < frag.indices.length; i++) {
-                    const index = frag.indices[i];
-                    assert(index + lastIndex < vertices);
-                    ibuf[ioffs++] = index + lastIndex;
-                }
-                lastIndex += n;
+                call.indexCount = ioffs - call.indexStart;
+
+                if (!output.has(params)) output.set(params, []);
+                output.get(params)!.push(call);
             }
-            const indexCount = ioffs - indexStart;
-            const call: DrawCall = { bbox, indexStart, indexCount };
-
-            let renderLayer = params.renderLayer;
-            if (params.atlas !== undefined && params.atlas.transparent)
-                renderLayer = GfxRendererLayer.TRANSLUCENT;
-            if (params.water) {
-                renderLayer = GfxRendererLayer.TRANSLUCENT + 1;
-            } else if (renderLayer === GfxRendererLayer.TRANSLUCENT && call.bbox.minY >= sealevel) {
-                renderLayer = GfxRendererLayer.TRANSLUCENT + 2;
-            }
-
-            let paramsAdjusted = params.clone();
-            paramsAdjusted.renderLayer = renderLayer;
-            paramsAdjusted = paramsAdjusted.intern();
-
-            console.log(paramsAdjusted, call);
-            if (!output.has(paramsAdjusted)) output.set(paramsAdjusted, []);
-            output.get(paramsAdjusted)!.push(call);
         }
 
         this.vertexBuffer = makeStaticDataBuffer(device, GfxBufferUsage.VERTEX, vbuf.buffer);
@@ -637,12 +644,13 @@ export class SceneRenderer extends Renderer {
         if (depth > this.draw.bbox.boundingSphereRadius() + 3 * this.params.maxDistance)
             return;
 
-        const originDepth = computeViewSpaceDepthFromWorldSpacePoint(viewerInput.camera, origin);
-        if (originDepth < 1500 && this.wholeMap) return;
-        if (originDepth >= 1500 && !this.wholeMap) return;
+        const cameraPos = vec3.transformMat4(scratchVec3, origin, viewerInput.camera.worldMatrix);
+        const altitude = cameraPos[1];
+        if (altitude <= 1000 && this.wholeMap) return;
+        if (altitude > 1000 && !this.wholeMap) return;
 
         const renderInst = super.prepareToRender(device, renderInstManager, viewerInput, colorSet)!;
-        renderInst.sortKey = setSortKeyDepth(this.sortKey, depth);
+        renderInst.sortKey = setSortKeyDepth(makeSortKey(this.params.renderLayer), depth);
         return;
     }
 }

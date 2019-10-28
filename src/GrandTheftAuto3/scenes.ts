@@ -3,7 +3,7 @@ import * as Viewer from '../viewer';
 import * as rw from 'librw';
 import { GfxDevice, GfxFormat } from '../gfx/platform/GfxPlatform';
 import { DataFetcher, DataFetcherFlags } from '../DataFetcher';
-import { GTA3Renderer, SceneRenderer, DrawKey, Texture, TextureArray, MeshInstance, ModelCache, SkyRenderer, rwTexture, MeshFragData, DrawParams } from './render';
+import { GTA3Renderer, SceneRenderer, DrawKey, Texture, TextureArray, MeshInstance, ModelCache, SkyRenderer, rwTexture, MeshFragData, DrawParams, DrawCall } from './render';
 import { SceneContext, Destroyable } from '../SceneBase';
 import { getTextDecoder, assert } from '../util';
 import { parseItemPlacement, ItemPlacement, parseItemDefinition, ItemDefinition, ObjectDefinition, ItemInstance, parseZones, parseItemPlacementBinary, createItemInstance } from './item';
@@ -333,21 +333,16 @@ export class GTA3SceneDesc implements Viewer.SceneDesc {
         const sealevel = this.water.origin[2];
         const uploaded = SceneRenderer.makeVBO(device, cache, layers, textureArrays, sealevel);
         for (const [params, calls] of uploaded) {
-            const bbox = new AABB(Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity);
-            const indexStart = calls[0].indexStart;
-            let indexCount = 0;
+            const callWorld = new DrawCall('', calls[0].indexStart);
             for (const call of calls) {
-                bbox.union(bbox, call.bbox);
-                indexCount += call.indexCount;
-
+                callWorld.merge(call);
                 renderer.sceneRenderers.push(new SceneRenderer(call, params, false));
                 if (!!(params.renderLayer & GfxRendererLayer.TRANSLUCENT) && !params.water)
                     renderer.sceneRenderers.push(new SceneRenderer(call, params, true));
             }
-            const call = { bbox, indexStart, indexCount };
-            renderer.sceneRenderers.push(new SceneRenderer(call, params, false, true));
+            renderer.sceneRenderers.push(new SceneRenderer(callWorld, params, false, true));
             if (!!(params.renderLayer & GfxRendererLayer.TRANSLUCENT) && !params.water)
-                renderer.sceneRenderers.push(new SceneRenderer(call, params, true, true));
+                renderer.sceneRenderers.push(new SceneRenderer(callWorld, params, true, true));
         }
 
         await this.fetchTXD(device, dataFetcher, 'particle', texture => {
