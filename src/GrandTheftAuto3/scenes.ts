@@ -1,12 +1,13 @@
 
 import * as rw from 'librw';
 import { SceneDesc, SceneGroup, SceneGfx } from '../viewer';
+import { initializeBasis, BasisFile, BasisFormat } from '../vendor/basis_universal';
 import { inflate } from 'pako';
 import { GfxDevice, GfxFormat } from '../gfx/platform/GfxPlatform';
 import { DataFetcher, DataFetcherFlags } from '../DataFetcher';
 import { GTA3Renderer, SceneRenderer, DrawParams, Texture, TextureArray, MeshInstance, ModelCache, SkyRenderer, rwTexture, MeshFragData, AreaRenderer } from './render';
 import { SceneContext, Destroyable } from '../SceneBase';
-import { getTextDecoder, assert, assertExists } from '../util';
+import { getTextDecoder, assert, assertExists, leftPad } from '../util';
 import { parseItemPlacement, ItemPlacement, parseItemDefinition, ItemDefinition, ObjectDefinition, parseZones, parseItemPlacementBinary, createItemInstance, ObjectFlags, INTERIOR_EVERYWHERE } from './item';
 import { parseTimeCycle, ColorSet } from './time';
 import { parseWaterPro, waterMeshFragData, waterDefinition, parseWater } from './water';
@@ -86,6 +87,7 @@ export class GTA3SceneDesc implements SceneDesc {
     protected ipl_stream: { [k: string]: number } = {};
     protected versionIMG = 1;
     protected extraIMG: string[] = [];
+    protected basisTextures = false;
 
     constructor(public name: string, private interior = 0, public id = String(interior)) {}
 
@@ -96,6 +98,7 @@ export class GTA3SceneDesc implements SceneDesc {
         await rw.init({ gtaPlugins: true, platform: rw.Platform.PLATFORM_D3D8 });
         rw.Texture.setCreateDummies(true);
         rw.Texture.setLoadTextures(false);
+        await initializeBasis();
         this.initialised = true;
     }
 
@@ -223,6 +226,49 @@ export class GTA3SceneDesc implements SceneDesc {
         header.delete();
         stream.delete();
         rw.UVAnimDictionary.current = null;
+    }
+
+    private async fetchBasisTextures(dataFetcher: DataFetcher, texturesUsed: Set<string>, cb: (texture: Texture) => void): Promise<void> {
+        const buffer = await this.fetch(dataFetcher, 'textures/index.json');
+        const text = getTextDecoder('utf8')!.decode(buffer!.createDataView());
+        const json = JSON.parse(text);
+        for (const transparent of [false, true]) {
+            const group = transparent ? 'transparent' : 'opaque';
+            const textures: any[] = json[group];
+            const n: number = textures.length;
+            for (let i = 0; i < Math.ceil(n / 0x100); i++) {
+                const path = `textures/${group}/${leftPad(i.toString(0x10), 2)}.basis`;
+                const data = await this.fetch(dataFetcher, path);
+                const basis = new BasisFile(data!.createTypedArray(Uint8Array));
+                const names = [];
+                for (let j = 0; j < 0x100 && 0x100 * i + j < textures.length; j++) {
+                    const { txd, name, index } = textures[0x100 * i + j];
+                    assert(Number.parseInt(index, 0x10) === 0x100 * i + j);
+                    names.push(`${txd}/${name}`);
+                }
+                assert(basis.getNumImages() === names.length);
+                assert(!!basis.startTranscoding());
+                for (let i = 0; i < names.length; i++) {
+                    const name = names[i];
+                    if (!texturesUsed.has(name)) continue;
+                    texturesUsed.delete(name);
+
+                    const width = basis.getImageWidth(i, 0);
+                    const height = basis.getImageHeight(i, 0);
+                    const pixelFormat = transparent ? GfxFormat.BC3 : GfxFormat.BC1;
+                    const format = transparent ? BasisFormat.cTFBC3 : BasisFormat.cTFBC1;
+                    const levels = [];
+                    const numLevels = basis.getNumLevels(i);
+                    for (let level = 0; level < numLevels; level++) {
+                        const size = basis.getImageTranscodedSizeInBytes(i, level, format);
+                        const dst = new Uint8Array(size);
+                        assert(!!basis.transcodeImage(dst, i, level, format, 0, 0));
+                        levels.push(dst);
+                    }
+                    cb({ name, width, height, levels, pixelFormat, transparent });
+                }
+            }
+        }
     }
 
     private generateSaveStates(ipls: ItemPlacement[]): { [k: string]: string } {
@@ -379,6 +425,11 @@ export class GTA3SceneDesc implements SceneDesc {
                 textureSet.clear();
             }
         }
+        if (this.basisTextures) {
+            await this.fetchBasisTextures(dataFetcher, texturesUsed, handleTexture);
+            txdsUsed.clear();
+            txdsUsed.add('particle');
+        }
         for (const txd of txdsUsed) {
             await this.fetchTXD(device, dataFetcher, txd, texture => {
                 if (texturesUsed.has(texture.name)) {
@@ -421,6 +472,8 @@ export class GTA3SceneDesc implements SceneDesc {
                 renderer.renderers.push(new SkyRenderer(device, cache, atlas));
             }
         });
+
+        //this.assetCache.destroy(device);
 
         return renderer;
     }
