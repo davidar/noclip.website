@@ -36,23 +36,18 @@ function loadAsset(img: ArrayBuffer, asset: Asset) {
     return img.slice(2048 * asset.offset, 2048 * (asset.offset + asset.size));
 }
 
-interface Metadata {
-    txd: string;
-    name: string;
-    index: string;
-}
-
-const pathBase = '../../../data/GrandTheftAutoSanAndreas/models/gta3';
+const pathBase = '../../../data/GrandTheftAutoSanAndreas';
 
 async function main() {
-    const img = await fs.readFile(pathBase + '.img');
+    const img = await fs.readFile(`${pathBase}/models/gta3.img`);
     const assets = loadDIR(img.buffer);
     await rw.init({ gtaPlugins: true, platform: rw.Platform.PLATFORM_D3D8 });
     rw.Texture.setCreateDummies(true);
     rw.Texture.setLoadTextures(false);
-    await fs.mkdir(pathBase, { recursive: true });
 
-    const textures = { opaque: [] as Metadata[], transparent: [] as Metadata[] };
+    const texturesOpaque: string[] = [];
+    const texturesTransparent: string[] = [];
+    const files = new Map<string, ArrayBuffer>();
     for (const asset of assets) {
         const name = asset.name.toLowerCase();
         const buffer = loadAsset(img.buffer, asset);
@@ -82,13 +77,13 @@ async function main() {
                     if (bpp === 4) png.data[4*i+3] = pixels[bpp*i+3];
                 }
 
-                const list = transparent ? textures.transparent : textures.opaque;
+                const list = transparent ? texturesTransparent : texturesOpaque;
                 const index = list.length.toString(0x10).padStart(4, '0');
                 const path = `${transparent ? 'transparent' : 'opaque'}/${index.substr(0, 2)}`;
                 const fname = `${path}/${index.substr(2, 2)}.png`;
-                list.push({ txd: txdName, name: texName, index })
-                await fs.mkdir(`${pathBase}/../../textures/${path}`, { recursive: true });
-                await finished(png.pack().pipe(createWriteStream(`${pathBase}/../../textures/${fname}`)));
+                list.push(`${txdName}/${texName}\n`);
+                await fs.mkdir(`${pathBase}/textures/${path}`, { recursive: true });
+                await finished(png.pack().pipe(createWriteStream(`${pathBase}/textures/${fname}`)));
                 console.log(fname);
 
                 image.delete();
@@ -97,11 +92,19 @@ async function main() {
             header.delete();
             stream.delete();
         } else {
-            await fs.writeFile(`${pathBase}/${name}`, Buffer.from(buffer));
-            console.log(name);
+            files.set(name, buffer);
         }
     }
-    await fs.writeFile(`${pathBase}/../../textures/index.json`, JSON.stringify(textures, null, 2));
+    await fs.writeFile(`${pathBase}/textures/opaque.txt`, texturesOpaque.join(''));
+    await fs.writeFile(`${pathBase}/textures/transparent.txt`, texturesTransparent.join(''));
+
+    let offset = Math.ceil((8 + 32 * files.size) / 2048);
+    for (const [name, buffer] of files) {
+        const size = buffer.byteLength / 2048;
+        const asset: Asset = { name, size, offset };
+        offset += size;
+        console.log(asset);
+    }
 }
 
 main();
