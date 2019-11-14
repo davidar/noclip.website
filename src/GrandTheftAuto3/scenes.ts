@@ -111,6 +111,7 @@ export class GTA3SceneDesc implements SceneDesc {
         const view = bufferDIR!.createDataView();
         const start = v1 ? 0 : 8;
         const dirLength = v1 ? view.byteLength : 32 * view.getUint32(4, true);
+        if (!v1) assert(view.getUint32(0) === 0x56455232); // "VER2" in ASCII
         for (let i = start; i < start + dirLength; i += 32) {
             const offset = view.getUint32(i + 0, true);
             const size = v1 ? view.getUint32(i + 4, true) : view.getUint16(i + 4, true);
@@ -142,15 +143,18 @@ export class GTA3SceneDesc implements SceneDesc {
         return buffer;
     }
 
+    private async fetchText(dataFetcher: DataFetcher, path:string): Promise<string> {
+        const buffer = await this.fetch(dataFetcher, path);
+        return getTextDecoder('utf8')!.decode(buffer!.createDataView());
+    }
+
     private async fetchIDE(dataFetcher: DataFetcher, id: string): Promise<ItemDefinition> {
-        const buffer = await this.fetch(dataFetcher, `data/maps/${id}.ide`);
-        const text = getTextDecoder('utf8')!.decode(buffer!.createDataView());
+        const text = await this.fetchText(dataFetcher, `data/maps/${id}.ide`);
         return parseItemDefinition(text);
     }
 
     private async fetchIPL(dataFetcher: DataFetcher, id: string): Promise<ItemPlacement> {
-        const buffer = await this.fetch(dataFetcher, (id === 'props') ? `data/maps/props.IPL` : `data/maps/${id}.ipl`);
-        const text = getTextDecoder('utf8')!.decode(buffer!.createDataView());
+        const text = await this.fetchText(dataFetcher, (id === 'props') ? `data/maps/props.IPL` : `data/maps/${id}.ipl`);
         const ipl = parseItemPlacement(id, text);
         if (!id.match(/\//)) return ipl;
         const basename = id.split('/')[1].toLowerCase();
@@ -166,23 +170,21 @@ export class GTA3SceneDesc implements SceneDesc {
     }
 
     private async fetchTimeCycle(dataFetcher: DataFetcher): Promise<ColorSet[]> {
-        const buffer = await this.fetch(dataFetcher, this.paths.dat.timecyc);
-        const text = getTextDecoder('utf8')!.decode(buffer!.createDataView());
+        const text = await this.fetchText(dataFetcher, this.paths.dat.timecyc);
         return parseTimeCycle(text, this.paths.dat.timecyc);
     }
 
     private async fetchZones(dataFetcher: DataFetcher): Promise<Map<string, AABB>> {
-        const buffer = await this.fetch(dataFetcher, this.paths.zon);
-        const text = getTextDecoder('utf8')!.decode(buffer!.createDataView());
+        const text = await this.fetchText(dataFetcher, this.paths.zon);
         return parseZones(text);
     }
 
     private async fetchWater(dataFetcher: DataFetcher): Promise<[ItemPlacement, MeshFragData[]]> {
-        const buffer = await this.fetch(dataFetcher, this.paths.dat.water);
         if (this.paths.dat.water.endsWith('water.dat')) {
-            const text = getTextDecoder('utf8')!.decode(buffer!.createDataView());
+            const text = await this.fetchText(dataFetcher, this.paths.dat.water);
             return [{ id: 'water', instances: [createItemInstance('water')], interiors: [] }, parseWater(text, this.water.texture)];
         } else {
+            const buffer = await this.fetch(dataFetcher, this.paths.dat.water);
             return [parseWaterPro(buffer!.createDataView(), this.water.origin), [waterMeshFragData(this.water.texture)]];
         }
     }
@@ -229,23 +231,16 @@ export class GTA3SceneDesc implements SceneDesc {
     }
 
     private async fetchBasisTextures(dataFetcher: DataFetcher, texturesUsed: Set<string>, cb: (texture: Texture) => void): Promise<void> {
-        const buffer = await this.fetch(dataFetcher, 'textures/index.json');
-        const text = getTextDecoder('utf8')!.decode(buffer!.createDataView());
-        const json = JSON.parse(text);
         for (const transparent of [false, true]) {
             const group = transparent ? 'transparent' : 'opaque';
-            const textures: any[] = json[group];
-            const n: number = textures.length;
-            for (let i = 0; i < Math.ceil(n / 0x100); i++) {
+            const textures = await this.fetchText(dataFetcher, `textures/${group}.txt`).then(s => s.trim().split('\n'));
+            for (let i = 0; i < Math.ceil(textures.length / 0x100); i++) {
                 const path = `textures/${group}/${leftPad(i.toString(0x10), 2)}.basis`;
                 const data = await this.fetch(dataFetcher, path);
                 const basis = new BasisFile(data!.createTypedArray(Uint8Array));
                 const names = [];
-                for (let j = 0; j < 0x100 && 0x100 * i + j < textures.length; j++) {
-                    const { txd, name, index } = textures[0x100 * i + j];
-                    assert(Number.parseInt(index, 0x10) === 0x100 * i + j);
-                    names.push(`${txd}/${name}`);
-                }
+                for (let j = 0; j < 0x100 && 0x100 * i + j < textures.length; j++)
+                    names.push(textures[0x100 * i + j]);
                 assert(basis.getNumImages() === names.length);
                 assert(!!basis.startTranscoding());
                 for (let i = 0; i < names.length; i++) {
@@ -298,9 +293,13 @@ export class GTA3SceneDesc implements SceneDesc {
         const lodnames = new Set<string>();
 
         this.assetCache = await context.dataShare.ensureObject<AssetCache>(this.pathBase, async () => new AssetCache());
-        await this.fetchIMG(dataFetcher);
-        for (const img of this.extraIMG)
-            await this.fetchIMG(dataFetcher, img, false);
+        if (this.basisTextures) {
+            await this.fetchIMG(dataFetcher, 'gta_notxd');
+        } else {
+            await this.fetchIMG(dataFetcher);
+            for (const img of this.extraIMG)
+                await this.fetchIMG(dataFetcher, img, false);
+        }
         this.assetCache.primed = true;
 
         const ides = await Promise.all(this.paths.ide.map(id => this.fetchIDE(dataFetcher, id)));
@@ -439,8 +438,10 @@ export class GTA3SceneDesc implements SceneDesc {
             });
         }
         for (const textureSet of textureSets.values()) {
-            textureArrays.push(new TextureArray(device, Array.from(textureSet)));
-            textureSet.clear();
+            if (textureSet.size > 0) {
+                textureArrays.push(new TextureArray(device, Array.from(textureSet)));
+                textureSet.clear();
+            }
         }
 
         const texturesMissing = texturesUsed;

@@ -44,7 +44,7 @@ class GTASASceneDesc extends GTA3SceneDesc {
         this.weatherPeriods = 8;
         this.versionIMG = 2;
         this.extraIMG = ['gta_int'];
-        //this.basisTextures = true;
+        this.basisTextures = true;
         this.paths = {
             zon: 'data/info.zon',
             dat: {
