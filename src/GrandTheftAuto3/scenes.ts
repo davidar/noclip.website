@@ -19,6 +19,7 @@ import { colorNewCopy, OpaqueBlack } from '../Color';
 import { MathConstants } from '../MathHelpers';
 import { serializeMat4 } from '../Camera';
 import { btoa } from '../Ascii85';
+import { decompressBC } from '../Common/bc_texture';
 
 function UTF8ToString(array: Uint8Array) {
     let length = 0; while (length < array.length && array[length]) length++;
@@ -230,13 +231,17 @@ export class GTA3SceneDesc implements SceneDesc {
         rw.UVAnimDictionary.current = null;
     }
 
-    private async fetchBasisTextures(dataFetcher: DataFetcher, texturesUsed: Set<string>, cb: (texture: Texture) => void): Promise<void> {
+    private async fetchBasisTextures(device: GfxDevice, dataFetcher: DataFetcher, texturesUsed: Set<string>, cb: (texture: Texture) => void): Promise<void> {
+        const useDXT = device.queryTextureFormatSupported(GfxFormat.BC1);
+        if (!useDXT) console.warn('DXT not supported');
         for (const transparent of [false, true]) {
             const group = transparent ? 'transparent' : 'opaque';
             const textures = await this.fetchText(dataFetcher, `textures/${group}.txt`).then(s => s.trim().split('\n'));
-            for (let i = 0; i < Math.ceil(textures.length / 0x100); i++) {
-                const path = `textures/${group}/${leftPad(i.toString(0x10), 2)}.basis`;
-                const data = await this.fetch(dataFetcher, path);
+            const promises = [];
+            for (let i = 0; i < Math.ceil(textures.length / 0x100); i++)
+                promises.push(this.fetch(dataFetcher, `textures/${group}/${leftPad(i.toString(0x10), 2)}.basis`));
+            for (let i = 0; i < promises.length; i++) {
+                const data = await promises[i];
                 const basis = new BasisFile(data!.createTypedArray(Uint8Array));
                 const names = [];
                 for (let j = 0; j < 0x100 && 0x100 * i + j < textures.length; j++)
@@ -250,14 +255,23 @@ export class GTA3SceneDesc implements SceneDesc {
 
                     const width = basis.getImageWidth(i, 0);
                     const height = basis.getImageHeight(i, 0);
-                    const pixelFormat = transparent ? GfxFormat.BC3 : GfxFormat.BC1;
+                    const pixelFormat = !useDXT ? GfxFormat.U8_RGBA_NORM
+                                      : transparent ? GfxFormat.BC3 : GfxFormat.BC1;
                     const format = transparent ? BasisFormat.cTFBC3 : BasisFormat.cTFBC1;
                     const levels = [];
                     const numLevels = basis.getNumLevels(i);
                     for (let level = 0; level < numLevels; level++) {
                         const size = basis.getImageTranscodedSizeInBytes(i, level, format);
-                        const dst = new Uint8Array(size);
+                        let dst = new Uint8Array(size);
                         assert(!!basis.transcodeImage(dst, i, level, format, 0, 0));
+                        if (!useDXT) dst = decompressBC({
+                            width: basis.getImageWidth(i, level),
+                            height: basis.getImageHeight(i, level),
+                            depth: 1,
+                            type: transparent ? 'BC3' : 'BC1',
+                            pixels: dst,
+                            flag: 'UNORM',
+                        }).pixels as Uint8Array;
                         levels.push(dst);
                     }
                     cb({ name, width, height, levels, pixelFormat, transparent });
@@ -425,7 +439,7 @@ export class GTA3SceneDesc implements SceneDesc {
             }
         }
         if (this.basisTextures) {
-            await this.fetchBasisTextures(dataFetcher, texturesUsed, handleTexture);
+            await this.fetchBasisTextures(device, dataFetcher, texturesUsed, handleTexture);
             txdsUsed.clear();
             txdsUsed.add('particle');
         }
