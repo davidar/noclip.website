@@ -1,4 +1,14 @@
 
+/*
+After running this script, install the basisu CLI from
+
+    https://github.com/BinomialLLC/basis_universal
+
+and run the following command from both of the newly created textures/{opaque,transparent}/ directories:
+
+    for i in *; do basisu -mipmap $i/*.png -output_file $i.basis; done
+*/
+
 import { createWriteStream, writeFileSync, promises as fs } from 'fs';
 import * as stream from 'stream';
 import { TextDecoder, promisify, TextEncoder } from 'util';
