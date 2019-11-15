@@ -1,5 +1,7 @@
 
 import * as rw from 'librw';
+//@ts-ignore
+import * as meta from './scenes.json';
 import { SceneDesc, SceneGroup, SceneGfx } from '../viewer';
 import { initializeBasis, BasisFile, BasisFormat } from '../vendor/basis_universal';
 import { inflate } from 'pako';
@@ -11,7 +13,7 @@ import { getTextDecoder, assert, assertExists, leftPad } from '../util';
 import { parseItemPlacement, ItemPlacement, parseItemDefinition, ItemDefinition, ObjectDefinition, parseZones, parseItemPlacementBinary, createItemInstance, ObjectFlags, INTERIOR_EVERYWHERE } from './item';
 import { parseTimeCycle, ColorSet } from './time';
 import { parseWaterPro, waterMeshFragData, waterDefinition, parseWater } from './water';
-import { vec4, mat4 } from 'gl-matrix';
+import { mat4 } from 'gl-matrix';
 import { AABB } from '../Geometry';
 import { GfxRendererLayer } from '../gfx/render/GfxRenderer';
 import ArrayBufferSlice from '../ArrayBufferSlice';
@@ -34,63 +36,46 @@ class AssetCache extends Map<string, ArrayBufferSlice> implements Destroyable {
     }
 }
 
+interface GameMetadata {
+    id: string;
+    name: string;
+    water: {
+        origin: number[];
+        texture: string;
+    };
+    weather: {
+        names: string[];
+        periods: number;
+    };
+    paths: {
+        zon: string;
+        dat: {
+            timecyc: string;
+            water: string;
+        };
+        ide: string[];
+        ipl: string[];
+    };
+    ipl_stream: {
+        [k: string]: number;
+    };
+    img: {
+        version: number,
+        extra: string[];
+    };
+    basisTextures: boolean;
+    map: {
+        name: string;
+        interiors: [string, number, string][];
+    };
+}
+
 const scratchColor = colorNewCopy(OpaqueBlack);
 export class GTA3SceneDesc implements SceneDesc {
     private static initialised = false;
     private assetCache: AssetCache;
 
-    protected pathBase = 'GrandTheftAuto3';
-    protected water = {
-        origin: vec4.fromValues(0, 0, 0, 2048),
-        texture: 'water_old',
-    };
-    protected weatherTypes = ['Sunny', 'Cloudy', 'Rainy', 'Foggy'];
-    protected weatherPeriods = 24;
-    protected paths = {
-        zon: 'data/gta3.zon',
-        dat: {
-            timecyc: 'data/timecyc.dat',
-            water: 'data/waterpro.dat',
-        },
-        ide: [
-            'generic',
-            'temppart/temppart',
-            'comroad/comroad',
-            'indroads/indroads',
-            'making/making',
-            'subroads/subroads',
-            'comntop/comntop',
-            'comnbtm/comnbtm',
-            'comse/comse',
-            'comsw/comsw',
-            'industne/industne',
-            'industnw/industnw',
-            'industse/industse',
-            'industsw/industsw',
-            'landne/landne',
-            'landsw/landsw',
-        ],
-        ipl: [
-            'comntop/comNtop',
-            'comnbtm/comNbtm',
-            'comse/comSE',
-            'comsw/comSW',
-            'industne/industNE',
-            'industnw/industNW',
-            'industse/industSE',
-            'industsw/industSW',
-            'landne/landne',
-            'landsw/landsw',
-            'overview',
-            'props',
-        ],
-    };
-    protected ipl_stream: { [k: string]: number } = {};
-    protected versionIMG = 1;
-    protected extraIMG: string[] = [];
-    protected basisTextures = false;
-
-    constructor(public name: string, private interior = 0, public id = String(interior)) {}
+    constructor(private meta: GameMetadata, public name: string, private interior: number, public id: string) {}
 
     private static async initialise() {
         if (this.initialised)
@@ -105,7 +90,7 @@ export class GTA3SceneDesc implements SceneDesc {
 
     private async fetchIMG(dataFetcher: DataFetcher, basename = 'gta3', compressed = true): Promise<void> {
         if (this.assetCache.primed) return;
-        const v1 = (this.versionIMG === 1);
+        const v1 = (this.meta.img.version === 1);
         const bufferIMG = compressed ? await this.fetchGZ(dataFetcher, `models/${basename}.imgz`)
                                        : await this.fetch(dataFetcher, `models/${basename}.img`);
         const bufferDIR = v1 ? await this.fetch(dataFetcher, `models/${basename}.dir`) : bufferIMG;
@@ -118,7 +103,7 @@ export class GTA3SceneDesc implements SceneDesc {
             const size = v1 ? view.getUint32(i + 4, true) : view.getUint16(i + 4, true);
             const name = UTF8ToString(bufferDIR!.subarray(i + 8, 24).createTypedArray(Uint8Array)).toLowerCase();
             const data = bufferIMG!.subarray(2048 * offset, 2048 * size);
-            const path = `${this.pathBase}/models/gta3/${name}`;
+            const path = `${this.meta.id}/models/gta3/${name}`;
             if (this.assetCache.has(path)) console.warn('Duplicate', path);
             this.assetCache.set(path, data);
         }
@@ -131,7 +116,7 @@ export class GTA3SceneDesc implements SceneDesc {
     }
 
     private async fetch(dataFetcher: DataFetcher, path: string, cache = true): Promise<ArrayBufferSlice | null> {
-        path = `${this.pathBase}/${path}`;
+        path = `${this.meta.id}/${path}`;
         let buffer = this.assetCache.get(path);
         if (buffer === undefined) {
             buffer = await dataFetcher.fetchData(path, DataFetcherFlags.ALLOW_404);
@@ -159,7 +144,7 @@ export class GTA3SceneDesc implements SceneDesc {
         const ipl = parseItemPlacement(id, text);
         if (!id.match(/\//)) return ipl;
         const basename = id.split('/')[1].toLowerCase();
-        const n = this.ipl_stream[basename];
+        const n = this.meta.ipl_stream[basename];
         if (n === undefined) return ipl;
         for (let i = 0; i < n; i++) {
             const sid = basename + '_stream' + i;
@@ -171,22 +156,22 @@ export class GTA3SceneDesc implements SceneDesc {
     }
 
     private async fetchTimeCycle(dataFetcher: DataFetcher): Promise<ColorSet[]> {
-        const text = await this.fetchText(dataFetcher, this.paths.dat.timecyc);
-        return parseTimeCycle(text, this.paths.dat.timecyc);
+        const text = await this.fetchText(dataFetcher, this.meta.paths.dat.timecyc);
+        return parseTimeCycle(text, this.meta.paths.dat.timecyc);
     }
 
     private async fetchZones(dataFetcher: DataFetcher): Promise<Map<string, AABB>> {
-        const text = await this.fetchText(dataFetcher, this.paths.zon);
+        const text = await this.fetchText(dataFetcher, this.meta.paths.zon);
         return parseZones(text);
     }
 
     private async fetchWater(dataFetcher: DataFetcher): Promise<[ItemPlacement, MeshFragData[]]> {
-        if (this.paths.dat.water.endsWith('water.dat')) {
-            const text = await this.fetchText(dataFetcher, this.paths.dat.water);
-            return [{ id: 'water', instances: [createItemInstance('water')], interiors: [] }, parseWater(text, this.water.texture)];
+        if (this.meta.paths.dat.water.endsWith('water.dat')) {
+            const text = await this.fetchText(dataFetcher, this.meta.paths.dat.water);
+            return [{ id: 'water', instances: [createItemInstance('water')], interiors: [] }, parseWater(text, this.meta.water.texture)];
         } else {
-            const buffer = await this.fetch(dataFetcher, this.paths.dat.water);
-            return [parseWaterPro(buffer!.createDataView(), this.water.origin), [waterMeshFragData(this.water.texture)]];
+            const buffer = await this.fetch(dataFetcher, this.meta.paths.dat.water);
+            return [parseWaterPro(buffer!.createDataView(), this.meta.water.origin), [waterMeshFragData(this.meta.water.texture)]];
         }
     }
 
@@ -293,7 +278,7 @@ export class GTA3SceneDesc implements SceneDesc {
             mat4.rotateY(worldMatrix, worldMatrix, MathConstants.DEG_TO_RAD * (enex.exitAngle - 90));
             const len = 1 + serializeMat4(saveStateView, 1, worldMatrix);
             const saveState = 'A' + btoa(saveStateTmp, len);
-            const key = `SaveState_${this.pathBase}/${enex.interior}/${enex.name}/1`;
+            const key = `SaveState_${this.meta.id}/${enex.interior}/${enex.name}/1`;
             saveStates.set(key, saveState);
         }
         return Object.assign({}, ...[...saveStates.entries()].sort().map(([k, v]) => ({[k]: v})));
@@ -306,17 +291,17 @@ export class GTA3SceneDesc implements SceneDesc {
         const objectIDs = new Map<number, string>();
         const lodnames = new Set<string>();
 
-        this.assetCache = await context.dataShare.ensureObject<AssetCache>(this.pathBase, async () => new AssetCache());
-        if (this.basisTextures) {
+        this.assetCache = await context.dataShare.ensureObject<AssetCache>(this.meta.id, async () => new AssetCache());
+        if (this.meta.basisTextures) {
             await this.fetchIMG(dataFetcher, 'gta_notxd');
         } else {
             await this.fetchIMG(dataFetcher);
-            for (const img of this.extraIMG)
+            for (const img of this.meta.img.extra)
                 await this.fetchIMG(dataFetcher, img, false);
         }
         this.assetCache.primed = true;
 
-        const ides = await Promise.all(this.paths.ide.map(id => this.fetchIDE(dataFetcher, id)));
+        const ides = await Promise.all(this.meta.paths.ide.map(id => this.fetchIDE(dataFetcher, id)));
         for (const ide of ides) for (const obj of ide.objects) {
             objects.set(obj.modelName, obj);
             if (obj.id !== undefined) objectIDs.set(obj.id, obj.modelName);
@@ -324,7 +309,7 @@ export class GTA3SceneDesc implements SceneDesc {
         }
         objects.set('water', waterDefinition);
 
-        const ipls = await Promise.all(this.paths.ipl.map(id => this.fetchIPL(dataFetcher, id)));
+        const ipls = await Promise.all(this.meta.paths.ipl.map(id => this.fetchIPL(dataFetcher, id)));
         const colorSets = await this.fetchTimeCycle(dataFetcher);
         const [waterIPL, waterMesh] = await this.fetchWater(dataFetcher);
         ipls.push(waterIPL);
@@ -349,7 +334,7 @@ export class GTA3SceneDesc implements SceneDesc {
         // uncomment to regenerate default save states
         //console.log(this.generateSaveStates(ipls));
 
-        const renderer = new GTA3Renderer(device, colorSets, this.weatherTypes, this.weatherPeriods, this.water.origin);
+        const renderer = new GTA3Renderer(device, colorSets, this.meta.weather.names, this.meta.weather.periods, this.meta.water.origin);
         const modelCache = new ModelCache();
         const texturesUsed = new Set<string>();
         const txdsUsed = new Set<string>();
@@ -438,7 +423,7 @@ export class GTA3SceneDesc implements SceneDesc {
                 textureSet.clear();
             }
         }
-        if (this.basisTextures) {
+        if (this.meta.basisTextures) {
             await this.fetchBasisTextures(device, dataFetcher, texturesUsed, handleTexture);
             txdsUsed.clear();
             txdsUsed.add('particle');
@@ -462,7 +447,7 @@ export class GTA3SceneDesc implements SceneDesc {
         if (texturesMissing.size > 0)
             console.warn('Missing textures', Array.from(texturesMissing).sort());
 
-        const sealevel = this.water.origin[2];
+        const sealevel = this.meta.water.origin[2];
         const cache = renderer.renderHelper.getCache();
         for (const area of areas.values()) {
             const areaRenderer = new AreaRenderer();
@@ -482,20 +467,34 @@ export class GTA3SceneDesc implements SceneDesc {
         }
 
         await this.fetchTXD(device, dataFetcher, 'particle', texture => {
-            if (texture.name === `particle/${this.water.texture}`) {
+            if (texture.name === `particle/${this.meta.water.texture}`) {
                 const atlas = new TextureArray(device, [texture]);
                 renderer.renderers.push(new SkyRenderer(device, cache, atlas));
             }
         });
 
-        //this.assetCache.destroy(device);
-
         return renderer;
     }
 }
 
-export const sceneGroup: SceneGroup = {
-    id: 'GrandTheftAuto3',
-    name: 'Grand Theft Auto III',
-    sceneDescs: [ new GTA3SceneDesc('Liberty City') ]
+function makeSceneGroup(meta: GameMetadata) {
+    const sceneGroup: SceneGroup = {
+        id: meta.id,
+        name: meta.name,
+        sceneDescs: [ new GTA3SceneDesc(meta, meta.map.name, 0, '0') ]
+    };
+    if (meta.map.interiors.length > 0) {
+        sceneGroup.sceneDescs.push('Interiors');
+        for (const [name, interior, suffix] of meta.map.interiors) {
+            const id = (suffix === '') ? String(interior) : `${interior}/${suffix.toLowerCase()}`;
+            sceneGroup.sceneDescs.push(new GTA3SceneDesc(meta, name, interior, id));
+        }
+    }
+    return sceneGroup;
+}
+
+export const sceneGroup = {
+    iii: makeSceneGroup(meta.iii),
+    vc: makeSceneGroup(meta.vc),
+    sa: makeSceneGroup(meta.sa),
 };
